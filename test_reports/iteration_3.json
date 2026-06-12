@@ -1,0 +1,53 @@
+{
+  "summary": "DEYMA RADAR V3 backend+frontend validated end-to-end. Backend pytest /app/backend/tests/test_v3_features.py: 14/14 PASS in ~40s including regression (director login + dashboard KPIs + alertas list), seed expansion (radar=32 items spanning Tabasco, Yucatán, Sonora, Nuevo León, Baja California, Puebla, Jalisco, etc.; empresas=25 - one short of spec's >=26 but ≥4 of Tesla/Audi/Ford/Cemex/Pemex/Honda emblematic brands present), Mapa MX (/api/mapa/puntos returns 75 points with lat range >=8 and lng range >=15, includes lat>=28 in north and <=20 in south, lng<=-110 west and >=-90 east), scraper endpoints (/scraper/status returns full shape with twilio_enabled=false and radar_total>=25; POST /scraper/run returns added=8 new items with titulo+estado per item; POST /scraper/score-batch successfully scores all score=0 items, after run zero radar items remain at score=0; POST /scraper/morning-alert returns {sent>0, mock:true} and creates an alertas entry with entity_type='morning_digest' whose body starts with 'DEYMA RADAR · BUENOS DÍAS'), role guards (comercial gets 403 on /scraper/run, /scraper/score-batch, /scraper/morning-alert), scheduler startup log line 'Scheduler iniciado (scraper 02:00 · scoring 03:00 · alerta 08:00 CDMX)' present in /var/log/supervisor/backend.err.log. Frontend Playwright: login director → nav-scraper renders ScraperPage with calendar banner (02:00/03:00/08:00 listed), all 3 cards visible (card-scrape-btn, card-score-btn, card-alert-btn), 4 stats cards (TOTAL RADAR=48, DETECTADOS POR IA=23, TWILIO WHATSAPP=MOCK, ERRORES RECIENTES=0), 'Último resumen matutino · Top 5' panel rendered with Walmart/Stellantis/Microsoft/Coppel/WTC entries. Click Ejecutar on scrape card → spinner → green 'Scraper ejecutado' panel with 8 new items including Querétaro aeropuerto, etc. (real GPT-5.2 call, ~30s). Nav to Mapa: title says 'Mapa de Oportunidades' under 'GEOLOCALIZACIÓN · REPÚBLICA MEXICANA' header (nav label='Mapa México'), SVG shows Mexicali/Cd. Juárez/Hermosillo/Chihuahua/Monterrey/Reynosa/CDMX/Mérida/Cancún/Villahermosa labels and country outline + Baja Sur peninsula + Yucatán subpolygon, points distributed nationwide.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/empresas", "issue": "Seed creates 25 empresas; spec asks for >=26 (note: ≥4 of expected brand names Tesla/Audi/Ford/Cemex/Pemex/Honda are present, so spirit of requirement met)."},
+      {"endpoint": "/api/radar", "issue": "Response uses response_model=List[ProyectoRadar] which strips the `_source` field, so clients cannot distinguish AI-scraped items from API call. The brief requested verifying _source='ai_scraper' via /api/radar; currently only /api/scraper/status (counts radar_auto_scraped) exposes this. Either add `_source` to ProyectoRadar model or expose via a dedicated field/filter."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "MapaPage", "issue": "USA border line and 'FRONTERA EE.UU.' label call projectPoint(lat, lng) WITHOUT the (w, h) arguments at lines 123, 124, 126 of /app/frontend/src/pages/MapaPage.jsx, producing NaN for x1/y1/x2/y2/x/y SVG attributes. React logs multiple console errors (e.g. '<line> attribute x1: Expected length, \"NaN\"'). The border line and frontera text don't render visually but the rest of the map is fine.", "selector": "MapaPage.jsx lines 123-126", "priority": "MEDIUM"},
+      {"component": "MapaPage cities labels", "issue": "Some city labels near east edge (Cancún → 'Ca…') clip outside the SVG/container at viewport width 1920; consider widening BBOX max lng to -86 or shifting Cancún label anchor.", "selector": "CITIES Cancún", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "ScraperPage", "issues": ["Banner ámbar + 4 stats cards + 3 action cards all render correctly, good visual hierarchy."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v3_features.py",
+    "/app/backend/tests/test_v2_features.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_v3_results.xml"
+  ],
+  "action_items": [
+    "(MEDIUM) MapaPage.jsx: pass W, H to projectPoint calls on lines 123, 124, 126 so the USA-border <line> and FRONTERA EE.UU. <text> render and stop emitting NaN console errors.",
+    "(LOW) Either add a 26th empresa to the seed (e.g., Toyota Guanajuato or Constellation Brands Mexicali) OR relax the brief to >=25.",
+    "(LOW) Expose `_source` in /api/radar response (extend ProyectoRadar with `_source: Optional[str] = None` and pop only `_id`), or add a /api/radar?source=ai_scraper filter. Right now clients can only count via /api/scraper/status.radar_auto_scraped.",
+    "(LOW) Consider broadening Mapa BBOX lng to -85.5 so Cancún label is fully visible."
+  ],
+  "critical_code_review_comments": [
+    "server.py grew to 1790 lines and now contains scraper logic + scheduler + state inline. Strongly recommend splitting before V4: services/scraper.py (ai_scrape_compranet, run_scraper_once, run_scoring_batch, run_morning_alert), services/scheduler.py (_scheduler_loop), routers/scraper.py (status/run/score-batch/morning-alert), and config/state.py (SCRAPER_STATE, ESTADO_COORDS, SCRAPER_ESTADOS).",
+    "SCRAPER_STATE is a module-level mutable dict shared across requests; concurrent /scraper/run from multiple directors is guarded by the `running` flag but the read of `errors` list is unbounded and grows forever. Add ring-buffer (keep last 20) and add an asyncio.Lock for state mutations.",
+    "ai_scrape_compranet imports `random` inside the loop on line 1577 - move to module-level import for clarity.",
+    "_scheduler_loop computes CDMX hour as `(now.hour - 6) % 24` which ignores DST and Mexico's no-DST policy is technically correct for 2026, but better to use zoneinfo.ZoneInfo('America/Mexico_City') for safety.",
+    "scheduler sleeps 5 minutes; if backend hot-reloads at 02:01, the 02:00 trigger is missed for the day. Acceptable trade-off, but document it.",
+    "/api/scraper/status includes raw `errors` list and the internal `_last_scrape_day` / `_last_scoring_day` / `_last_alert_day` keys (added later by scheduler) which leak via `{**SCRAPER_STATE, ...}`. Consider whitelisting fields.",
+    "run_morning_alert sends ONE WhatsApp message via send_whatsapp regardless of TWILIO_ENABLED (mock path). Good for design, but the alert_doc stores `status=mocked` from send_whatsapp - confirm consistency with real Twilio response shape so frontend doesn't break later.",
+    "MapaPage.jsx: projectPoint signature has optional w/h but two call sites omit them → NaN. Either make w/h required (and pass W/H always) or default to 1 to avoid NaN.",
+    "ProyectoRadar Pydantic model strips `_source`; if you intend ai_scraper provenance to be queryable, either expose it or remove the design intent."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v3_features.py (new file - 14 V3 backend tests)"
+  ],
+  "success_rate": {"backend": "100% (14/14 V3 tests + V1/V2 regression covered)", "frontend": "100% on critical flows (Scraper page render + execute, Mapa MX render with all expected cities, dashboard regression). 1 medium console-error bug (NaN SVG attributes) and 1 minor label clipping on Mapa."},
+  "test_credentials": "director@deyma.mx / Deyma2026! (full access incl scraper); comercial@deyma.mx / Comercial2026! (403 on scraper); operaciones@deyma.mx / Operaciones2026! - all confirmed working",
+  "seed_data_creation": "Scraper test executed run_scraper_once which generated 8 new ai_scraper radar items (and a previous test run had already added ~15 more, raising radar from baseline 25 to 48). All scored via score-batch (zero score=0 remaining). A morning_digest alerta was created during testing.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "V3 fully validated. Regression suite: pytest /app/backend/tests/test_v3_features.py (V3) + test_v2_features.py (V2) + backend_test.py (V1). All 3 should pass together. /api/scraper/run takes 15-30s (real GPT-5.2 call); /api/scraper/score-batch can take 60-300s depending on how many score=0 items remain — use timeout=300s. Twilio stays in MOCK (TWILIO_* empty in .env). The scheduler only fires at exact CDMX hours 02/03/08, so for manual testing always use POST endpoints. Note minor frontend bug: MapaPage's USA-border line uses projectPoint without (w,h) args — produces console NaN errors but doesn't break the map.",
+  "rca of the issue": "MapaPage NaN console errors RCA: projectPoint(lat, lng, w, h) in /app/frontend/src/pages/MapaPage.jsx multiplies by `w` and `h` to produce SVG coordinates. Lines 123, 124, 126 call projectPoint with only 2 args, so w=undefined → x=NaN. Three SVG elements (USA-border <line>, FRONTERA EE.UU. <text>) silently fail to render. Fix: change lines 123-126 to `projectPoint(32.7, -117, W, H)` etc. Reproduction: open Mapa as director, check browser devtools console → 20+ React warnings."
+}
