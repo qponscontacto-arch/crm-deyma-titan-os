@@ -120,10 +120,10 @@ export default function MapaPage() {
           <path d={yucatan(W, H)} fill="rgba(245, 158, 11, 0.04)" stroke="rgba(245, 158, 11, 0.30)" strokeWidth="1"/>
 
           {/* USA border line */}
-          <line x1={projectPoint(32.7, -117).x} y1={projectPoint(32.7, -117).y}
-                x2={projectPoint(25.9, -97.1).x} y2={projectPoint(25.9, -97.1).y}
+          <line x1={projectPoint(32.7, -117, W, H).x} y1={projectPoint(32.7, -117, W, H).y}
+                x2={projectPoint(25.9, -97.1, W, H).x} y2={projectPoint(25.9, -97.1, W, H).y}
                 stroke="rgba(255,255,255,0.15)" strokeWidth="1" strokeDasharray="4,4"/>
-          <text x={projectPoint(33, -106).x} y={projectPoint(33, -106).y - 6} fill="rgba(255,255,255,0.25)" fontSize="9" fontFamily="IBM Plex Mono, monospace">FRONTERA EE.UU.</text>
+          <text x={projectPoint(33, -106, W, H).x} y={projectPoint(33, -106, W, H).y - 6} fill="rgba(255,255,255,0.25)" fontSize="9" fontFamily="IBM Plex Mono, monospace">FRONTERA EE.UU.</text>
 
           {/* cities */}
           {CITIES.map((c) => {

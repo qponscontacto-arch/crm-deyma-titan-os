@@ -1547,6 +1547,7 @@ async def ai_scrape_compranet() -> List[dict]:
     """Use GPT-5.2 as a synthetic scraper that 'reads' compranet/tenders MX news
     and emits 5-8 realistic licitations for DEYMA's niche. Returns list of dicts
     ready to insert in `radar` collection."""
+    import random
     system = (
         "Eres un agente de inteligencia comercial que monitorea diariamente Compranet "
         "(compranet.hacienda.gob.mx), tenders.mx, noticias industriales (El Financiero, Expansión, "
@@ -1574,7 +1575,6 @@ async def ai_scrape_compranet() -> List[dict]:
         estado = it.get("estado", "Querétaro")
         coords = ESTADO_COORDS.get(estado, ESTADO_COORDS["Querétaro"])
         # add small jitter so multiple items in same state don't overlap exactly
-        import random
         lat = coords[0] + (random.random() - 0.5) * 0.4
         lng = coords[1] + (random.random() - 0.5) * 0.4
         out.append({

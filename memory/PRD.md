@@ -294,11 +294,24 @@ Wireframes implementados en código (no Figma) en:
    - `DEYMA_ALERT_PHONE=whatsapp:+521442XXXXXXX`
 4. `sudo supervisorctl restart backend` y listo — las alertas se envían reales sin tocar código.
 
+### V3 P1 entregada (3ª iteración · HOY)
+- ✅ **Mapa de toda la República Mexicana**: BBOX expandido de Bajío a 14.4°-32.8°N · -118.5° a -86.5°W. 30 ciudades industriales (Tijuana, Hermosillo, Cd. Juárez, Monterrey, Saltillo, Reynosa, Bajío completo, Guadalajara, CDMX, Puebla, Mérida, Cancún, Villahermosa, etc.). 3 sub-polígonos schemáticos: México continental + Baja California Sur + Yucatán + línea de frontera USA.
+- ✅ **+16 empresas seed** distribuidas por toda la República: Tesla Gigafactory NL, Kia Pesquería, Volkswagen Puebla, Audi San José Chiapa, Ford Hermosillo, Cemex Mérida, Pemex Dos Bocas (Tabasco), Honda Jalisco, Tijuana Industrial Park, Hofusan, Toyota Apaseo, Mabe Saltillo, Bachoco Mérida, Equinix MX1, etc.
+- ✅ **+13 proyectos radar seed** en estados nuevos: Coahuila, Nuevo León, Puebla, Tabasco, Baja California, Sonora, Yucatán, Jalisco.
+- ✅ **Scraper IA nocturno** (`POST /api/scraper/run`, solo director): GPT-5.2 genera 5-8 oportunidades sintéticas-realistas basadas en tendencias de Compranet/Tenders MX/noticias industriales, dedupea por título y agrega al radar con `_source='ai_scraper'`.
+- ✅ **Batch scoring nocturno** (`POST /api/scraper/score-batch`, solo director): califica todos los items con score=0, dispara auto-alerta para los HOT (≥85).
+- ✅ **Resumen matutino WhatsApp** (`POST /api/scraper/morning-alert`, solo director): top 5 oportunidades detectadas en las últimas 36h, alerta tipo `morning_digest` con cuerpo "DEYMA RADAR · BUENOS DÍAS" formateado.
+- ✅ **Scheduler asyncio background**: dispara scraper a 02:00, scoring a 03:00, alerta matutina a 08:00 hora CDMX (UTC-6). Anti-replay diario.
+- ✅ **Frontend `/scraper`**: 3 action cards (Ejecutar / Calificar / Enviar) + 4 stats cards (Total radar / Detectados IA / Twilio status / Errores) + panel del último resumen matutino con top 5 + log de ejecuciones.
+- ✅ Testing iter 3: 14/14 backend V3 (100%) + 100% frontend crítico. Bug NaN del mapa **resuelto**.
+
 ### Pendiente backlog (Next Action Items)
-- V2 P2: PDF cotización con logo SVG real DEYMA (actualmente texto estilizado) + numeración personalizada por sucursal
-- V2 P2: Recordatorios por correo de tareas vencidas (SendGrid/Resend)
-- V2 P2: Storage real de documentos (Cloudinary o S3) — la UI ya está lista
-- V2 P3: Conversión inversa: importar Cotización aceptada → Obra (actualmente solo desde oportunidad ganada)
-- V2 P3: Refactor server.py en routers/services modules (1505 líneas, conviene dividir)
-- V3: App móvil PWA, Portal Cliente, Scraping Compranet, Predicción ventas con histórico
-- V4: Multi-tenant SaaS
+- **V3 P2**: Scraper REAL de Compranet (cuando el sitio esté accesible desde el container o pasando por proxy). Hoy es 100% sintético vía GPT-5.2.
+- **V3 P2**: Refactor `server.py` (ahora 1790 líneas) → routers/services modules
+- **V3 P2**: Exponer `_source` en `/api/radar` para que el frontend pueda filtrar items auto-scraped vs manuales
+- **V3 P2**: Activar Twilio real (llenar las 4 env vars TWILIO_*)
+- **V2 P2 pendiente**: Recordatorios por correo de tareas vencidas (SendGrid/Resend); Storage real de documentos (Cloudinary/S3); Logo SVG real DEYMA en PDF
+- **V3**: App móvil PWA, Portal Cliente, Predicción ventas con histórico
+- **V4**: Multi-tenant SaaS
+
+## 14. Estado actual de implementación (12-Jun-2026 · V3 P1)
