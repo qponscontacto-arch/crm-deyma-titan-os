@@ -1114,6 +1114,7 @@ async def importar_radar(rid: str, body: ImportarRadarIn, user: dict = Depends(g
     }
     await db.oportunidades.insert_one(op)
     op.pop("_id", None)
+    op.pop("_from_radar", None)
     return op
 
 

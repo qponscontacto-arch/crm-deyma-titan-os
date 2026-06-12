@@ -261,8 +261,9 @@ Wireframes implementados en código (no Figma) en:
 
 ---
 
-## 13. Estado actual de implementación (12-Jun-2026)
+## 13. Estado actual de implementación (12-Jun-2026 · V2 P1)
 
+### V1 entregada (1ª iteración)
 - ✅ Backend FastAPI 100% funcional con 24+ endpoints
 - ✅ Frontend React con 7 páginas navegables + auth flow completo
 - ✅ Diseño industrial dark según guidelines (Chivo + IBM Plex)
@@ -270,10 +271,34 @@ Wireframes implementados en código (no Figma) en:
 - ✅ IA GPT-5.2 integrada (scoring, resumen, correos, forecast) — probado funcional
 - ✅ Mapa SVG custom del corredor Bajío con 22+ puntos georreferenciados
 - ✅ test_credentials.md con 3 roles pre-cargados
+- ✅ Testing: 22/22 backend (100%), 95% frontend
 
-**Pendiente backlog (Next Action Items)**:
-- WhatsApp/Email automation (V2)
-- PDF cotización (V2)
-- Importar oportunidad desde radar con un click (mejora UX)
-- Sistema de actividades por oportunidad (V2)
-- App móvil (V3)
+### V2 P1 entregada (2ª iteración · HOY)
+- ✅ **PDF Cotización profesional** con membrete DEYMA generado server-side con ReportLab (logo, datos cliente, tabla de conceptos, totales, condiciones comerciales, firmas). Endpoint `GET /api/cotizaciones/{id}/pdf` + descarga con un click en la tabla y dentro del preview.
+- ✅ **WhatsApp Alertas HOT** vía Twilio con **fallback MOCK** (cuando faltan keys). Auto-trigger cuando score IA ≥ 85. Página `/alertas` con banner de estado, stats, log de alertas y botón de prueba (solo director).
+- ✅ **Convertir oportunidad ganada → obra** en un click desde el OpDetailModal. Hereda monto, empresa, ciudad; pre-llena fechas (hoy + 120 días). Crea actividad-nota automática. Bloquea duplicados.
+- ✅ **Importar proyecto del Radar al CRM** con modal de selección de empresa. Hereda titulo/sector/descripcion/monto/score/hotness/reasons. Crea oportunidad en etapa Prospección con probabilidad 25%.
+- ✅ **Sistema de Actividades** por oportunidad: tipos (llamada, correo, reunión, visita, nota, tarea) + fecha datetime-local + descripción + completada toggle + delete. Timeline en OpDetailModal.
+- ✅ **Página "Mis Tareas"** muestra pendientes del usuario actual con filtros (Pendientes / Todas), badge VENCIDA para fechas pasadas, links a oportunidad.
+- ✅ **Documentos por entidad** (MOCK metadata-only) en OpDetailModal: nombre, tipo (PDF/DWG/XLSX/JPG/PNG/DOC), tamaño, autor. Listo para integrar Cloudinary/S3 cuando se quiera.
+- ✅ ESC key cierra modales (mejora UX)
+- ✅ Testing: 15/15 backend V2 (100%), 100% frontend V2 nuevas features
+
+**Activación Twilio real** (cuando estés listo):
+1. Crear cuenta en https://www.twilio.com
+2. Activar WhatsApp Sandbox o número aprobado
+3. Llenar en `/app/backend/.env`:
+   - `TWILIO_ACCOUNT_SID=AC...`
+   - `TWILIO_AUTH_TOKEN=...`
+   - `TWILIO_WHATSAPP_FROM=whatsapp:+14155238886` (o tu número)
+   - `DEYMA_ALERT_PHONE=whatsapp:+521442XXXXXXX`
+4. `sudo supervisorctl restart backend` y listo — las alertas se envían reales sin tocar código.
+
+### Pendiente backlog (Next Action Items)
+- V2 P2: PDF cotización con logo SVG real DEYMA (actualmente texto estilizado) + numeración personalizada por sucursal
+- V2 P2: Recordatorios por correo de tareas vencidas (SendGrid/Resend)
+- V2 P2: Storage real de documentos (Cloudinary o S3) — la UI ya está lista
+- V2 P3: Conversión inversa: importar Cotización aceptada → Obra (actualmente solo desde oportunidad ganada)
+- V2 P3: Refactor server.py en routers/services modules (1505 líneas, conviene dividir)
+- V3: App móvil PWA, Portal Cliente, Scraping Compranet, Predicción ventas con histórico
+- V4: Multi-tenant SaaS

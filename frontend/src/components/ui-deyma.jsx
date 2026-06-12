@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 
 export function Surface({ children, className = "", ...rest }) {
   return <div className={`surface ${className}`} {...rest}>{children}</div>;
@@ -67,6 +67,12 @@ export function StageBadge({ stage }) {
 }
 
 export function Modal({ open, onClose, title, children, testId, size = "md" }) {
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") onClose && onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
   if (!open) return null;
   const w = size === "lg" ? "max-w-3xl" : size === "xl" ? "max-w-5xl" : "max-w-md";
   return (
