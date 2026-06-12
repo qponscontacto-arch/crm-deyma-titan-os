@@ -9,6 +9,8 @@ import CRMPage from "@/pages/CRMPage";
 import RadarPage from "@/pages/RadarPage";
 import CotizadorPage from "@/pages/CotizadorPage";
 import MapaPage from "@/pages/MapaPage";
+import AlertasPage from "@/pages/AlertasPage";
+import MisTareasPage from "@/pages/MisTareasPage";
 import ObrasPage from "@/pages/ObrasPage";
 
 function Protected({ children }) {
@@ -32,6 +34,8 @@ function App() {
               <Route path="cotizador" element={<CotizadorPage />} />
               <Route path="mapa" element={<MapaPage />} />
               <Route path="obras" element={<ObrasPage />} />
+              <Route path="tareas" element={<MisTareasPage />} />
+              <Route path="alertas" element={<AlertasPage />} />
             </Route>
           </Routes>
         </AuthProvider>

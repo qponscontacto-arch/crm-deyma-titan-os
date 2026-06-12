@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { api, fmtMXN, formatApiError } from "../lib/auth";
+import { api, fmtMXN, formatApiError, downloadPdf } from "../lib/auth";
 import { Modal, EmptyState } from "../components/ui-deyma";
-import { Plus, Trash2, FileText } from "lucide-react";
+import { Plus, Trash2, FileText, Download } from "lucide-react";
 
 const ESTADO_BADGE = {
   borrador: "text-zinc-400 border-zinc-400/40",
@@ -49,7 +49,10 @@ export default function CotizadorPage() {
                   <td className="font-mono text-right font-semibold text-amber-400">{fmtMXN(c.total)}</td>
                   <td><span className={`badge ${ESTADO_BADGE[c.estado]}`}>{c.estado.toUpperCase()}</span></td>
                   <td className="font-mono text-xs text-zinc-500">{new Date(c.created_at).toLocaleDateString("es-MX")}</td>
-                  <td><button data-testid={`view-cot-${c.id}`} onClick={() => setPreview(c)} className="text-sky-400 hover:text-sky-300"><FileText size={14}/></button></td>
+                  <td className="flex items-center gap-2">
+                    <button data-testid={`view-cot-${c.id}`} onClick={() => setPreview(c)} className="text-sky-400 hover:text-sky-300" title="Vista previa"><FileText size={14}/></button>
+                    <button data-testid={`download-cot-${c.id}`} onClick={() => downloadPdf(`/cotizaciones/${c.id}/pdf`, `cotizacion_${c.folio}.pdf`)} className="text-amber-400 hover:text-amber-300" title="Descargar PDF"><Download size={14}/></button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -91,6 +94,11 @@ export default function CotizadorPage() {
               </div>
             </div>
             {preview.notas && <div><div className="label-overline">Notas</div><p className="text-xs text-zinc-400">{preview.notas}</p></div>}
+            <div className="flex justify-end pt-2">
+              <button data-testid="preview-download-pdf" onClick={() => downloadPdf(`/cotizaciones/${preview.id}/pdf`, `cotizacion_${preview.folio}.pdf`)} className="btn-primary flex items-center gap-2">
+                <Download size={14}/> Descargar PDF
+              </button>
+            </div>
           </div>
         )}
       </Modal>

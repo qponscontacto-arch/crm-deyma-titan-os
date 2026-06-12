@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api, fmtMXN, formatApiError, SECTOR_LABEL, STAGE_LABEL, STAGE_ORDER } from "../lib/auth";
 import { Modal, Hotness, ScoreBar, StageBadge, EmptyState } from "../components/ui-deyma";
-import { Plus, Sparkles, Mail } from "lucide-react";
+import OpDetailModal from "../components/OpDetailModal";
+import { Plus, Sparkles, Mail, Eye } from "lucide-react";
 
 export default function CRMPage() {
   const [tab, setTab] = useState("pipeline");
@@ -11,6 +12,7 @@ export default function CRMPage() {
   const [openOp, setOpenOp] = useState(false);
   const [openEmp, setOpenEmp] = useState(false);
   const [emailModal, setEmailModal] = useState(null);
+  const [detailOp, setDetailOp] = useState(null);
 
   const load = async () => {
     const [e, c, o] = await Promise.all([api.get("/empresas"), api.get("/contactos"), api.get("/oportunidades")]);
@@ -97,6 +99,9 @@ export default function CRMPage() {
                         <button data-testid={`email-btn-${op.id}`} onClick={() => genEmail(op)} className="text-[10px] px-2 py-1 border border-sky-500/40 text-sky-400 hover:bg-sky-500/10 flex items-center gap-1" title="Generar correo">
                           <Mail size={10} /> Correo
                         </button>
+                        <button data-testid={`detail-btn-${op.id}`} onClick={() => setDetailOp(op)} className="text-[10px] px-2 py-1 border border-white/15 text-zinc-300 hover:bg-white/5 flex items-center gap-1" title="Ver detalle, actividades y documentos">
+                          <Eye size={10} /> Ver
+                        </button>
                         <select
                           data-testid={`stage-select-${op.id}`}
                           value={s} onChange={(e) => moveStage(op.id, e.target.value)}
@@ -160,6 +165,7 @@ export default function CRMPage() {
 
       <NewOpModal open={openOp} onClose={() => setOpenOp(false)} empresas={empresas} onSaved={() => { setOpenOp(false); load(); }} />
       <NewEmpresaModal open={openEmp} onClose={() => setOpenEmp(false)} onSaved={() => { setOpenEmp(false); load(); }} />
+      <OpDetailModal open={!!detailOp} onClose={() => setDetailOp(null)} op={detailOp} onChanged={load} />
 
       <Modal open={!!emailModal} onClose={() => setEmailModal(null)} title="Correo de seguimiento (IA)" size="lg" testId="email-modal">
         {emailModal?.loading ? (

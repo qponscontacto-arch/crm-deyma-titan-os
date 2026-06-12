@@ -1,7 +1,7 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
-import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight } from "lucide-react";
+import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo } from "lucide-react";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testId: "nav-dashboard" },
@@ -10,6 +10,8 @@ const NAV = [
   { to: "/cotizador", label: "Cotizador", icon: FileText, testId: "nav-cotizador" },
   { to: "/mapa", label: "Mapa Bajío", icon: Map, testId: "nav-mapa" },
   { to: "/obras", label: "Obras", icon: Hammer, testId: "nav-obras" },
+  { to: "/tareas", label: "Mis Tareas", icon: ListTodo, testId: "nav-tareas" },
+  { to: "/alertas", label: "Alertas HOT", icon: Bell, testId: "nav-alertas" },
 ];
 
 export default function AppLayout() {

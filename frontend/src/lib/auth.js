@@ -80,3 +80,20 @@ export const STAGE_LABEL = {
 };
 
 export const STAGE_ORDER = ["prospeccion", "calificada", "propuesta", "negociacion", "ganada", "perdida"];
+
+export const ACTIVIDAD_LABEL = {
+  llamada: "Llamada",
+  correo: "Correo",
+  reunion: "Reunión",
+  visita: "Visita",
+  nota: "Nota",
+  tarea: "Tarea",
+};
+
+export async function downloadPdf(url, filename) {
+  const res = await api.get(url, { responseType: "blob" });
+  const blobUrl = window.URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
+  const a = document.createElement("a");
+  a.href = blobUrl; a.download = filename; document.body.appendChild(a); a.click();
+  a.remove(); window.URL.revokeObjectURL(blobUrl);
+}

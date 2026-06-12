@@ -1,0 +1,42 @@
+{
+  "summary": "DEYMA RADAR V2 P1 features fully validated. Backend: 15/15 pytest passed (100%) in /app/backend/tests/test_v2_features.py covering PDF cotización (returns valid application/pdf with %PDF magic bytes, >3KB, correct content-disposition filename), convertir-obra (success + 400 on duplicate + 400 on non-ganada + auto activity 'nota' created with completada=true), importar-radar (oportunidad created with titulo/sector/descripcion/monto/score/hotness inherited from radar, owner_id=current user), actividades CRUD with filters (oportunidad_id, mias=true, pendientes=true) + PATCH toggle + DELETE, documentos MOCK CRUD (mock=true flag), alertas (twilio_enabled=false, alert_phone=null, /alertas/test creates mock alert deterministically, 403 for non-director). V1 regression (login + dashboard KPIs) also passes. Frontend: PDF download triggers from [data-testid='download-cot-{id}'] (3491 bytes, filename cotizacion_DEY-2026-0004.pdf) AND from [data-testid='preview-download-pdf'] in modal. Alertas page renders MOCK banner; [data-testid='test-alert-btn'] increments alertas count 3→4. Mis Tareas page renders with tab-pendientes/tab-todas, switching to Todas shows 8 tasks. OpDetailModal: convertir-obra-btn appears in ganada card banner, new-actividad-form + new-doc-form + op-tab-documentos all present, MOCK banner visible in documentos tab. Radar import modal opens with empresa selector (11 options), submit creates op visible in CRM Prospección (count went 6→7, new card inherits WARM hotness from radar).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Cotización preview modal", "issue": "ESC key does not close the modal (only the X button does). Minor UX nit - tests can work around by clicking X. Same may affect OpDetailModal navigation if user tries to use ESC then immediately click sidebar.", "selector": "[role='dialog'] in CotizadorPage", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v2_features.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_v2_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Add ESC key handler to close modals (CotizadorPage preview modal, OpDetailModal) for better UX consistency.",
+    "(Optional, code review) server.py is now ~1505 lines (was 975 in V1). Splitting routers (routers/cotizaciones.py, routers/actividades.py, routers/documentos.py, services/pdf.py, services/alerts.py) is becoming necessary before adding more features.",
+    "(Optional) test_alerta endpoint allows duplicate test alerts piling up - may want to dedupe or limit to last N for the mock case. Not blocking."
+  ],
+  "critical_code_review_comments": [
+    "server.py now ~1505 lines with V2 endpoints inline; should be split into routers/services modules.",
+    "/api/oportunidades/{oid}/convertir-obra: stores _op_id in DB doc and pops before returning - good. But the auto-actividad insertion is not transactional with the obra insert; if obra insert succeeds but actividad insert fails, you get a silent inconsistency. Consider try/except around the actividad insert and a warning log, or accept it as best-effort.",
+    "/api/radar/{rid}/importar: stores _from_radar in op doc and pops _id but does NOT pop _from_radar before returning - the field leaks into the response. Minor.",
+    "/api/actividades and /api/documentos lack role guards: any authenticated user (including operaciones) can read/create/delete any user's actividades or documentos. Consider restricting delete to owner or director.",
+    "DocumentoIn.tamano_bytes has no upper bound; without a real storage layer it's harmless, but when binary upload is added, add max size enforcement.",
+    "DEYMA_ALERT_PHONE / TWILIO_* vars correctly default to empty string and TWILIO_ENABLED resolves to False - mock path works as designed. When user adds keys later, ensure phone format validation (E.164) is added in send_whatsapp before the live call.",
+    "_build_cotizacion_pdf runs via asyncio.to_thread - good. ReportLab is sync. Verified PDF >2KB with %PDF magic bytes and correct content-disposition filename.",
+    "/api/alertas/test endpoint creates an alert every call with score=90 and is rate-limit-free; in dev this is fine but should probably warn or rate-limit in prod.",
+    "Frontend modals (CotizadorPage preview, OpDetailModal) do not bind Escape key handler - users have to click the X."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v2_features.py (new file - 15 V2 feature tests)"
+  ],
+  "success_rate": {"backend": "100% (15/15 V2 tests, plus V1 regression checks)", "frontend": "100% (all V2 flows: PDF download, alertas, mis tareas, OpDetailModal convertir/actividades/documentos, radar import all working)"},
+  "test_credentials": "director@deyma.mx / Deyma2026! ; comercial@deyma.mx / Comercial2026! ; operaciones@deyma.mx / Operaciones2026! - all working",
+  "seed_data_creation": "V2 tests created and (where applicable) cleaned up: TEST_op_ganada_conv (converted to obra), TEST_op_actividades + 1 actividad (created/patched/deleted), TEST_propuesta.pdf documento (created/deleted), 2 extra mock HOT alertas (one from /alertas/test in test, one from UI test_alert_btn). New op imported from radar 'Nuevo CEDIS Mercado Libre Texcoco' now lives in Prospección column.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "V2 P1 features are fully validated end-to-end. Reusable regression: pytest /app/backend/tests/test_v2_features.py and /app/backend/tests/backend_test.py. Twilio remains in MOCK mode (TWILIO_* empty in .env) by design; do NOT attempt real WhatsApp sends. To validate alertas auto-creation by score>=85, prefer the deterministic /api/alertas/test endpoint (director only). PDF endpoint requires the 'reportlab' library (already installed). Public URL https://opp-detector.preview.emergentagent.com.",
+  "rca of the issue": "No blocking issues. One minor UX observation: modals don't close on Escape key (CotizadorPage preview and OpDetailModal). Workaround in tests: navigate via URL or click X. Not a blocker."
+}

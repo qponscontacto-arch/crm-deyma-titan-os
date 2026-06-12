@@ -1,16 +1,21 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { api, fmtMXN, SECTOR_LABEL } from "../lib/auth";
-import { Hotness, ScoreBar } from "../components/ui-deyma";
-import { Sparkles, ExternalLink, Filter, Radar as RadarIcon } from "lucide-react";
+import { api, fmtMXN, formatApiError, SECTOR_LABEL } from "../lib/auth";
+import { Hotness, ScoreBar, Modal } from "../components/ui-deyma";
+import { Sparkles, ExternalLink, Filter, Radar as RadarIcon, ArrowRightCircle } from "lucide-react";
 
 const SOURCE_LABEL = { licitacion: "Licitación", noticia: "Noticia", referencia: "Referencia", prospeccion: "Prospección" };
 
 export default function RadarPage() {
   const [items, setItems] = useState([]);
+  const [empresas, setEmpresas] = useState([]);
   const [sector, setSector] = useState("todos");
   const [scoring, setScoring] = useState(null);
+  const [importTarget, setImportTarget] = useState(null);
 
-  const load = async () => { const { data } = await api.get("/radar"); setItems(data); };
+  const load = async () => {
+    const [{ data }, { data: emp }] = await Promise.all([api.get("/radar"), api.get("/empresas")]);
+    setItems(data); setEmpresas(emp);
+  };
   useEffect(() => { load(); }, []);
 
   const filtered = useMemo(() => {
@@ -84,7 +89,10 @@ export default function RadarPage() {
                   <button data-testid={`radar-score-btn-${p.id}`} onClick={() => scoreOne(p.id)} disabled={scoring === p.id} className="btn-ghost text-[10px] flex items-center gap-1">
                     <Sparkles size={11} strokeWidth={2}/> {scoring === p.id ? "Calificando…" : "Calificar IA"}
                   </button>
-                  {p.url_fuente && <a href={`https://${p.url_fuente.replace(/^https?:\/\//, "")}`} target="_blank" rel="noreferrer" className="text-[10px] text-sky-400 hover:text-sky-300 flex items-center gap-1"><ExternalLink size={10}/>{p.url_fuente}</a>}
+                  <button data-testid={`radar-import-btn-${p.id}`} onClick={() => setImportTarget(p)} className="text-[10px] px-2 py-1 border border-amber-500/60 text-amber-400 hover:bg-amber-500/10 flex items-center gap-1 font-bold uppercase tracking-wider" style={{ fontFamily: "Chivo, sans-serif" }}>
+                    <ArrowRightCircle size={11} strokeWidth={2}/> Importar al CRM
+                  </button>
+                  {p.url_fuente && <a href={`https://${p.url_fuente.replace(/^https?:\/\//, "")}`} target="_blank" rel="noreferrer" className="text-[10px] text-sky-400 hover:text-sky-300 flex items-center gap-1 ml-auto"><ExternalLink size={10}/>{p.url_fuente}</a>}
                 </div>
               </div>
             </div>
@@ -97,6 +105,54 @@ export default function RadarPage() {
           </div>
         )}
       </div>
+
+      <ImportarModal target={importTarget} empresas={empresas} onClose={() => setImportTarget(null)} onDone={() => { setImportTarget(null); load(); }} />
     </div>
+  );
+}
+
+function ImportarModal({ target, empresas, onClose, onDone }) {
+  const [empresaId, setEmpresaId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => { setEmpresaId(""); setErr(""); }, [target]);
+
+  if (!target) return null;
+
+  const submit = async (e) => {
+    e.preventDefault(); setBusy(true); setErr("");
+    try {
+      await api.post(`/radar/${target.id}/importar`, { empresa_id: empresaId, probabilidad: 25, stage: "prospeccion" });
+      onDone();
+      alert(`Proyecto "${target.titulo}" importado al CRM como oportunidad en prospección.`);
+    } catch (e) { setErr(formatApiError(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Modal open={!!target} onClose={onClose} title="Importar al CRM" testId="importar-radar-modal">
+      <form onSubmit={submit} className="space-y-4">
+        <div className="surface-elev p-3">
+          <div className="label-overline">Proyecto</div>
+          <div className="font-semibold text-sm">{target.titulo}</div>
+          <div className="text-xs text-zinc-400 mt-1">{SECTOR_LABEL[target.sector]} · {target.ciudad}, {target.estado}</div>
+          <div className="font-mono text-amber-400 mt-1">{fmtMXN(target.monto_estimado)}</div>
+        </div>
+        <div>
+          <label className="label-overline">Asignar a empresa</label>
+          <select required data-testid="importar-empresa-select" className="input-field" value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}>
+            <option value="">Selecciona una empresa…</option>
+            {empresas.map((emp) => <option key={emp.id} value={emp.id}>{emp.nombre}</option>)}
+          </select>
+          <div className="text-[10px] text-zinc-500 mt-1 font-mono">Se creará una oportunidad en etapa "Prospección" con probabilidad 25%.</div>
+        </div>
+        {err && <div className="text-rose-400 text-xs">{err}</div>}
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="btn-ghost">Cancelar</button>
+          <button type="submit" data-testid="importar-submit-btn" disabled={busy} className="btn-primary">{busy ? "Importando…" : "Importar al CRM"}</button>
+        </div>
+      </form>
+    </Modal>
   );
 }

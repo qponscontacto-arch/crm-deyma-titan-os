@@ -14,6 +14,7 @@ from typing import List, Optional, Literal
 import bcrypt
 import jwt
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -33,6 +34,13 @@ security = HTTPBearer(auto_error=False)
 JWT_ALGO = "HS256"
 JWT_SECRET = os.environ['JWT_SECRET']
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
+
+# Twilio WhatsApp (mock when keys missing)
+TWILIO_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
+TWILIO_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
+TWILIO_FROM = os.environ.get('TWILIO_WHATSAPP_FROM', '')
+DEYMA_ALERT_PHONE = os.environ.get('DEYMA_ALERT_PHONE', '')
+TWILIO_ENABLED = bool(TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM and DEYMA_ALERT_PHONE)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("deyma")
@@ -513,6 +521,10 @@ async def score_oportunidad(oid: str, user: dict = Depends(get_current_user)):
         {"$set": {"score": result["score"], "hotness": result["hotness"],
                   "score_reasons": result["reasons"], "updated_at": iso(now_utc())}},
     )
+    if result["score"] >= 85:
+        emp = await db.empresas.find_one({"id": op["empresa_id"]}, {"_id": 0}) or {}
+        await create_hot_alert("oportunidad", oid, op["titulo"], result["score"],
+                               op["monto_estimado"], op["sector"], emp.get("ciudad", "Querétaro"))
     return result
 
 
@@ -558,6 +570,9 @@ async def score_radar(rid: str, user: dict = Depends(get_current_user)):
         {"id": rid},
         {"$set": {"score": result["score"], "hotness": result["hotness"], "score_reasons": result["reasons"]}},
     )
+    if result["score"] >= 85:
+        await create_hot_alert("radar", rid, p["titulo"], result["score"],
+                               p["monto_estimado"], p["sector"], p.get("ciudad", "Bajío"))
     return result
 
 
@@ -936,6 +951,517 @@ async def seed_data():
             })
         if ccdocs:
             await db.cotizaciones.insert_many(ccdocs)
+
+
+# ----------------------------------------------------------------------------
+# V2: WhatsApp Alerts (Twilio with MOCK fallback)
+# ----------------------------------------------------------------------------
+async def send_whatsapp(to: str, body: str) -> dict:
+    """Send WhatsApp. Falls back to MOCK (log only) if Twilio creds missing."""
+    if not TWILIO_ENABLED:
+        logger.info(f"[WHATSAPP MOCK] → {to}: {body[:80]}…")
+        return {"mock": True, "to": to, "status": "queued_mock"}
+    try:
+        from twilio.rest import Client as TwClient
+        cli = TwClient(TWILIO_SID, TWILIO_TOKEN)
+        # Twilio SDK is sync - run in thread to avoid blocking event loop
+        msg = await asyncio.to_thread(
+            lambda: cli.messages.create(from_=TWILIO_FROM, to=to, body=body)
+        )
+        return {"mock": False, "sid": msg.sid, "status": msg.status, "to": to}
+    except Exception as e:
+        logger.exception("Twilio send error")
+        return {"mock": False, "error": str(e), "status": "failed", "to": to}
+
+
+async def create_hot_alert(entity_type: str, entity_id: str, titulo: str, score: int, monto: float, sector: str, ciudad: str):
+    """Persist alert + dispatch WhatsApp when an opportunity/radar hits HOT (>=85)."""
+    body = (
+        f"DEYMA RADAR · ALERTA HOT ({score}/100)\n"
+        f"{titulo}\n"
+        f"Sector: {sector} · {ciudad}\n"
+        f"Monto: MXN ${monto:,.0f}\n"
+        f"Acción: revisa el sistema y asigna comercial."
+    )
+    alert_doc = {
+        "id": new_id(),
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "titulo": titulo,
+        "score": score,
+        "monto": monto,
+        "sector": sector,
+        "ciudad": ciudad,
+        "body": body,
+        "created_at": iso(now_utc()),
+        "channel": "whatsapp",
+        "to": DEYMA_ALERT_PHONE or "MOCK",
+        "status": "pending",
+        "mock": not TWILIO_ENABLED,
+    }
+    if DEYMA_ALERT_PHONE or not TWILIO_ENABLED:
+        result = await send_whatsapp(DEYMA_ALERT_PHONE or "whatsapp:+0000000000", body)
+        alert_doc["status"] = result.get("status", "unknown")
+        alert_doc["mock"] = result.get("mock", True)
+        if result.get("sid"):
+            alert_doc["sid"] = result["sid"]
+        if result.get("error"):
+            alert_doc["error"] = result["error"]
+    await db.alertas.insert_one(alert_doc)
+    alert_doc.pop("_id", None)
+    return alert_doc
+
+
+@api.get("/alertas")
+async def list_alertas(user: dict = Depends(get_current_user)):
+    items = await db.alertas.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return {"items": items, "twilio_enabled": TWILIO_ENABLED, "alert_phone": DEYMA_ALERT_PHONE or None}
+
+
+@api.post("/alertas/test")
+async def test_alerta(user: dict = Depends(require_roles("director"))):
+    """Manual test of WhatsApp pipeline."""
+    return await create_hot_alert("test", "manual", "Prueba manual de alerta HOT", 90, 1_000_000, "manufactura", "Querétaro")
+
+
+# ----------------------------------------------------------------------------
+# V2: Convertir oportunidad ganada → obra
+# ----------------------------------------------------------------------------
+class ConvertirObraIn(BaseModel):
+    nombre: Optional[str] = None
+    fecha_inicio: Optional[str] = None
+    fecha_fin_estimada: Optional[str] = None
+    ciudad: Optional[str] = None
+
+
+@api.post("/oportunidades/{oid}/convertir-obra")
+async def convertir_a_obra(oid: str, body: ConvertirObraIn, user: dict = Depends(get_current_user)):
+    op = await db.oportunidades.find_one({"id": oid}, {"_id": 0})
+    if not op:
+        raise HTTPException(status_code=404, detail="Oportunidad no encontrada")
+    if op.get("stage") != "ganada":
+        raise HTTPException(status_code=400, detail="La oportunidad debe estar en etapa 'ganada'")
+    existing = await db.obras.find_one({"_op_id": oid})
+    if existing:
+        raise HTTPException(status_code=400, detail="Ya existe una obra creada desde esta oportunidad")
+    emp = await db.empresas.find_one({"id": op["empresa_id"]}, {"_id": 0}) or {}
+    obra_doc = {
+        "id": new_id(),
+        "_op_id": oid,
+        "empresa_id": op["empresa_id"],
+        "cotizacion_id": None,
+        "nombre": body.nombre or op["titulo"],
+        "monto_contratado": op["monto_estimado"],
+        "fecha_inicio": body.fecha_inicio or iso(now_utc()),
+        "fecha_fin_estimada": body.fecha_fin_estimada or iso(now_utc() + timedelta(days=120)),
+        "estado": "planeacion",
+        "avance_pct": 0,
+        "ciudad": body.ciudad or emp.get("ciudad", "Querétaro"),
+        "estado_geo": emp.get("estado", "Querétaro"),
+        "created_at": iso(now_utc()),
+    }
+    await db.obras.insert_one(obra_doc)
+    obra_doc.pop("_id", None)
+    obra_doc.pop("_op_id", None)
+    # Registrar actividad automática
+    await db.actividades.insert_one({
+        "id": new_id(),
+        "oportunidad_id": oid,
+        "tipo": "nota",
+        "fecha": iso(now_utc()),
+        "descripcion": f"Oportunidad convertida a obra: {obra_doc['nombre']}",
+        "owner_id": user["id"],
+        "completada": True,
+        "created_at": iso(now_utc()),
+    })
+    return obra_doc
+
+
+# ----------------------------------------------------------------------------
+# V2: Importar proyecto del Radar al CRM como Oportunidad
+# ----------------------------------------------------------------------------
+class ImportarRadarIn(BaseModel):
+    empresa_id: str
+    probabilidad: int = 25
+    stage: Stage = "prospeccion"
+
+
+@api.post("/radar/{rid}/importar")
+async def importar_radar(rid: str, body: ImportarRadarIn, user: dict = Depends(get_current_user)):
+    p = await db.radar.find_one({"id": rid}, {"_id": 0})
+    if not p:
+        raise HTTPException(status_code=404, detail="Proyecto radar no encontrado")
+    emp = await db.empresas.find_one({"id": body.empresa_id}, {"_id": 0})
+    if not emp:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    op = {
+        "id": new_id(),
+        "empresa_id": body.empresa_id,
+        "titulo": p["titulo"],
+        "sector": p["sector"],
+        "descripcion": p["descripcion"],
+        "monto_estimado": p["monto_estimado"],
+        "stage": body.stage,
+        "probabilidad": body.probabilidad,
+        "score": p.get("score", 0),
+        "hotness": p.get("hotness", "cold"),
+        "score_reasons": p.get("score_reasons", []),
+        "owner_id": user["id"],
+        "fecha_cierre": None,
+        "created_at": iso(now_utc()),
+        "updated_at": iso(now_utc()),
+        "_from_radar": rid,
+    }
+    await db.oportunidades.insert_one(op)
+    op.pop("_id", None)
+    return op
+
+
+# ----------------------------------------------------------------------------
+# V2: Actividades / Tareas por oportunidad
+# ----------------------------------------------------------------------------
+ActividadTipo = Literal["llamada", "correo", "reunion", "visita", "nota", "tarea"]
+
+
+class ActividadIn(BaseModel):
+    oportunidad_id: str
+    tipo: ActividadTipo
+    fecha: str  # ISO datetime
+    descripcion: str
+    completada: bool = False
+
+
+class Actividad(ActividadIn):
+    id: str
+    owner_id: str
+    created_at: str
+
+
+@api.get("/actividades")
+async def list_actividades(oportunidad_id: Optional[str] = None, mias: bool = False,
+                           pendientes: bool = False, user: dict = Depends(get_current_user)):
+    q = {}
+    if oportunidad_id:
+        q["oportunidad_id"] = oportunidad_id
+    if mias:
+        q["owner_id"] = user["id"]
+    if pendientes:
+        q["completada"] = False
+    items = await db.actividades.find(q, {"_id": 0}).sort("fecha", -1).to_list(500)
+    return items
+
+
+@api.post("/actividades")
+async def create_actividad(body: ActividadIn, user: dict = Depends(get_current_user)):
+    doc = body.model_dump()
+    doc["id"] = new_id()
+    doc["owner_id"] = user["id"]
+    doc["created_at"] = iso(now_utc())
+    await db.actividades.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+class ActividadToggle(BaseModel):
+    completada: bool
+
+
+@api.patch("/actividades/{aid}")
+async def toggle_actividad(aid: str, body: ActividadToggle, user: dict = Depends(get_current_user)):
+    res = await db.actividades.update_one({"id": aid}, {"$set": {"completada": body.completada}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Actividad no encontrada")
+    return {"ok": True}
+
+
+@api.delete("/actividades/{aid}")
+async def delete_actividad(aid: str, user: dict = Depends(get_current_user)):
+    await db.actividades.delete_one({"id": aid})
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# V2: Documentos (metadata mock — no binary storage)
+# ----------------------------------------------------------------------------
+class DocumentoIn(BaseModel):
+    entidad_tipo: Literal["oportunidad", "empresa", "obra", "cotizacion"]
+    entidad_id: str
+    nombre: str
+    tipo: str  # pdf, jpg, dwg, xlsx, etc.
+    tamano_bytes: int = 0
+    url: Optional[str] = None  # placeholder when real storage is added
+
+
+@api.get("/documentos")
+async def list_documentos(entidad_tipo: Optional[str] = None, entidad_id: Optional[str] = None,
+                          user: dict = Depends(get_current_user)):
+    q = {}
+    if entidad_tipo:
+        q["entidad_tipo"] = entidad_tipo
+    if entidad_id:
+        q["entidad_id"] = entidad_id
+    return await db.documentos.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+
+@api.post("/documentos")
+async def create_documento(body: DocumentoIn, user: dict = Depends(get_current_user)):
+    doc = body.model_dump()
+    doc["id"] = new_id()
+    doc["uploaded_by"] = user["id"]
+    doc["uploaded_by_name"] = user.get("name", "")
+    doc["created_at"] = iso(now_utc())
+    doc["mock"] = True  # signal no real storage yet
+    await db.documentos.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.delete("/documentos/{did}")
+async def delete_documento(did: str, user: dict = Depends(get_current_user)):
+    await db.documentos.delete_one({"id": did})
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# V2: PDF de Cotización (ReportLab con membrete DEYMA)
+# ----------------------------------------------------------------------------
+@api.get("/cotizaciones/{cid}/pdf")
+async def cotizacion_pdf(cid: str, user: dict = Depends(get_current_user)):
+    cot = await db.cotizaciones.find_one({"id": cid}, {"_id": 0})
+    if not cot:
+        raise HTTPException(status_code=404, detail="Cotización no encontrada")
+    emp = await db.empresas.find_one({"id": cot["empresa_id"]}, {"_id": 0}) or {}
+    cont = await db.contactos.find_one({"empresa_id": cot["empresa_id"]}, {"_id": 0}) or {}
+    pdf_bytes = await asyncio.to_thread(_build_cotizacion_pdf, cot, emp, cont, user)
+    import io
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="cotizacion_{cot["folio"]}.pdf"'},
+    )
+
+
+def _build_cotizacion_pdf(cot: dict, emp: dict, cont: dict, user: dict) -> bytes:
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_RIGHT
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    import io as _io
+
+    AMBER = colors.HexColor("#f59e0b")
+    DARK = colors.HexColor("#18181b")
+    GRAY = colors.HexColor("#71717a")
+    LIGHT = colors.HexColor("#f4f4f5")
+
+    buf = _io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=LETTER,
+                            leftMargin=1.8 * cm, rightMargin=1.8 * cm,
+                            topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+                            title=f"Cotización {cot['folio']}")
+    styles = getSampleStyleSheet()
+    body = ParagraphStyle("body", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=12, textColor=DARK)
+    body_sm = ParagraphStyle("bs", parent=body, fontSize=8, leading=10)
+
+    story = []
+
+    # Header / membrete
+    header_data = [
+        [
+            Paragraph(
+                '<font color="#f59e0b" size="22"><b>DEYMA</b></font>'
+                '<font color="#71717a" size="22"> · RADAR</font>'
+                '<br/><font color="#71717a" size="7">SISTEMA DE INTELIGENCIA COMERCIAL · CONSTRUCCIÓN INDUSTRIAL</font>',
+                body,
+            ),
+            Paragraph(
+                f'<b>COTIZACIÓN</b><br/>'
+                f'<font color="#f59e0b"><b>{cot["folio"]}</b></font><br/>'
+                f'<font size="7" color="#71717a">FECHA: {datetime.fromisoformat(cot["created_at"].replace("Z","+00:00")).strftime("%d/%m/%Y") if isinstance(cot["created_at"], str) else ""}</font>',
+                ParagraphStyle("hd", parent=body, alignment=TA_RIGHT, fontSize=10, leading=12),
+            ),
+        ]
+    ]
+    h_tbl = Table(header_data, colWidths=[11 * cm, 6 * cm])
+    h_tbl.setStyle(TableStyle([
+        ("LINEBELOW", (0, 0), (-1, -1), 1.5, AMBER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+    ]))
+    story.append(h_tbl)
+    story.append(Spacer(1, 0.6 * cm))
+
+    # Cliente
+    cli_data = [[
+        Paragraph(
+            '<font color="#71717a"><b>CLIENTE</b></font><br/>'
+            f'<b>{emp.get("nombre","—")}</b><br/>'
+            f'{emp.get("ciudad","")}, {emp.get("estado","")}<br/>'
+            f'<font color="#71717a">{emp.get("rfc","RFC s/inf.")}</font>',
+            body,
+        ),
+        Paragraph(
+            '<font color="#71717a"><b>CONTACTO</b></font><br/>'
+            f'<b>{cont.get("nombre","—")}</b><br/>'
+            f'{cont.get("puesto","")}<br/>'
+            f'<font color="#71717a">{cont.get("email","")} · {cont.get("telefono","")}</font>',
+            body,
+        ),
+        Paragraph(
+            '<font color="#71717a"><b>PROYECTO</b></font><br/>'
+            f'<b>{cot["proyecto_titulo"]}</b><br/>'
+            f'<font color="#71717a">Validez: {cot["validez_dias"]} días</font><br/>'
+            f'<font color="#71717a">Estado: {cot["estado"].upper()}</font>',
+            body,
+        ),
+    ]]
+    cli_tbl = Table(cli_data, colWidths=[5.5 * cm, 5.5 * cm, 6 * cm])
+    cli_tbl.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, GRAY),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(cli_tbl)
+    story.append(Spacer(1, 0.5 * cm))
+
+    # Items table
+    items_data = [["#", "DESCRIPCIÓN", "CANT.", "UNIDAD", "P. UNIT.", "SUBTOTAL"]]
+    for i, it in enumerate(cot["items"], 1):
+        subt = it["cantidad"] * it["precio_unitario"]
+        items_data.append([
+            str(i),
+            Paragraph(it["descripcion"], body_sm),
+            f"{it['cantidad']:,.2f}",
+            it["unidad"],
+            f"${it['precio_unitario']:,.2f}",
+            f"${subt:,.2f}",
+        ])
+    it_tbl = Table(items_data, colWidths=[0.8 * cm, 8.5 * cm, 2 * cm, 1.5 * cm, 2 * cm, 2.5 * cm])
+    it_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), DARK),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+        ("ALIGN", (3, 0), (3, -1), "CENTER"),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT]),
+        ("LINEBELOW", (0, 0), (-1, 0), 1, AMBER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(it_tbl)
+    story.append(Spacer(1, 0.4 * cm))
+
+    # Totals
+    totals_data = [
+        ["", "SUBTOTAL", f"${cot['subtotal']:,.2f}"],
+        ["", f"IVA ({cot['iva_pct']}%)", f"${cot['iva_monto']:,.2f}"],
+        ["", "TOTAL MXN", f"${cot['total']:,.2f}"],
+    ]
+    tot_tbl = Table(totals_data, colWidths=[10 * cm, 4 * cm, 3.3 * cm])
+    tot_tbl.setStyle(TableStyle([
+        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+        ("FONTNAME", (1, 0), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (1, 0), (-1, 1), 9),
+        ("TEXTCOLOR", (1, 0), (-1, 1), GRAY),
+        ("FONTSIZE", (1, 2), (-1, 2), 13),
+        ("TEXTCOLOR", (1, 2), (-1, 2), AMBER),
+        ("LINEABOVE", (1, 2), (-1, 2), 1, AMBER),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(tot_tbl)
+    story.append(Spacer(1, 0.7 * cm))
+
+    # Notas
+    if cot.get("notas"):
+        story.append(Paragraph('<font color="#71717a"><b>NOTAS</b></font>', body))
+        story.append(Spacer(1, 0.15 * cm))
+        story.append(Paragraph(cot["notas"], body_sm))
+        story.append(Spacer(1, 0.4 * cm))
+
+    # Condiciones
+    cond_text = (
+        "<b>CONDICIONES COMERCIALES</b><br/>"
+        f"• Vigencia de la cotización: <b>{cot['validez_dias']} días naturales</b> a partir de la fecha de emisión.<br/>"
+        "• Precios en pesos mexicanos (MXN), no incluyen otros impuestos distintos al IVA indicado.<br/>"
+        "• Forma de pago: 50% anticipo, 50% contra entrega (sujeto a negociación).<br/>"
+        "• Tiempo de entrega: a convenir según calendario de obra.<br/>"
+        "• Garantía: pisos industriales 12 meses, mantenimiento 6 meses contra defectos de instalación.<br/>"
+    )
+    story.append(Paragraph(cond_text, body_sm))
+    story.append(Spacer(1, 1.2 * cm))
+
+    # Firma
+    firma_data = [[
+        Paragraph(
+            '<para alignment="center">'
+            '_______________________________<br/>'
+            f'<b>{user.get("name","DEYMA")}</b><br/>'
+            f'<font size="7" color="#71717a">{user.get("email","")}</font><br/>'
+            '<font size="7" color="#71717a">DEYMA CONSTRUCCIONES S.A. DE C.V.</font>'
+            '</para>',
+            body_sm,
+        ),
+        Paragraph(
+            '<para alignment="center">'
+            '_______________________________<br/>'
+            f'<b>{cont.get("nombre","Cliente")}</b><br/>'
+            f'<font size="7" color="#71717a">{emp.get("nombre","")}</font><br/>'
+            '<font size="7" color="#71717a">ACEPTACIÓN DE COTIZACIÓN</font>'
+            '</para>',
+            body_sm,
+        ),
+    ]]
+    f_tbl = Table(firma_data, colWidths=[8.5 * cm, 8.5 * cm])
+    f_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+    story.append(f_tbl)
+
+    # Footer
+    def _footer(canvas, _doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(GRAY)
+        canvas.drawString(1.8 * cm, 1 * cm, "DEYMA · RADAR  ·  Sistema de Inteligencia Comercial")
+        canvas.drawRightString(20 * cm, 1 * cm, f"Folio {cot['folio']}  ·  Página {_doc.page}")
+        canvas.setStrokeColor(AMBER)
+        canvas.setLineWidth(1.2)
+        canvas.line(1.8 * cm, 1.3 * cm, 20 * cm, 1.3 * cm)
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    return buf.getvalue()
+
+
+# ----------------------------------------------------------------------------
+# Auto-trigger HOT alerts on scoring updates
+# ----------------------------------------------------------------------------
+@api.post("/oportunidades/{oid}/score-and-alert")
+async def score_and_alert(oid: str, user: dict = Depends(get_current_user)):
+    """Wrapper: score the opportunity and dispatch alert if HOT (>=85)."""
+    op = await db.oportunidades.find_one({"id": oid}, {"_id": 0})
+    if not op:
+        raise HTTPException(status_code=404, detail="Oportunidad no encontrada")
+    result = await ai_score_opportunity(op["titulo"], op["sector"], op["descripcion"], op["monto_estimado"])
+    await db.oportunidades.update_one(
+        {"id": oid},
+        {"$set": {"score": result["score"], "hotness": result["hotness"],
+                  "score_reasons": result["reasons"], "updated_at": iso(now_utc())}},
+    )
+    alert = None
+    if result["score"] >= 85:
+        emp = await db.empresas.find_one({"id": op["empresa_id"]}, {"_id": 0}) or {}
+        alert = await create_hot_alert("oportunidad", oid, op["titulo"], result["score"],
+                                       op["monto_estimado"], op["sector"], emp.get("ciudad", "Querétaro"))
+    return {"score": result, "alert": alert}
 
 
 # ----------------------------------------------------------------------------
