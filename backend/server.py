@@ -135,6 +135,8 @@ class EmpresaIn(BaseModel):
     estado: str = "Querétaro"
     sitio_web: Optional[str] = None
     notas: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
 
 
 class Empresa(EmpresaIn):
@@ -288,7 +290,10 @@ async def _llm_call(system: str, user_text: str, session_id: str = None) -> str:
         system_message=system,
     ).with_model("openai", "gpt-5.2")
     msg = UserMessage(text=user_text)
-    resp = await chat.send_message(msg)
+    try:
+        resp = await asyncio.wait_for(chat.send_message(msg), timeout=45.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Timeout LLM (45s)")
     if isinstance(resp, str):
         return resp
     # fallback
