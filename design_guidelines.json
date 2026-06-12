@@ -1,0 +1,128 @@
+{
+  "theme": "dark",
+  "archetype": "Archetype 4 (Swiss & High-Contrast) - Industrial Dark / Bloomberg Terminal Variant",
+  "design_philosophy": "Premium executive feel for heavy industry. Trustworthy, precise, robust, authoritative. Dense information architecture avoiding consumer-SaaS aesthetics.",
+  "typography": {
+    "font_families": {
+      "heading": "'Chivo', sans-serif",
+      "body": "'IBM Plex Sans', sans-serif",
+      "mono": "'IBM Plex Mono', monospace"
+    },
+    "hierarchy": {
+      "h1": "text-3xl md:text-4xl tracking-tight font-black",
+      "h2": "text-xl md:text-2xl tracking-tight font-bold",
+      "h3": "text-lg md:text-xl font-semibold",
+      "body": "text-sm leading-relaxed",
+      "data": "text-xs font-mono tracking-wide",
+      "overline": "text-[10px] uppercase tracking-[0.2em] font-bold text-zinc-400"
+    }
+  },
+  "colors": {
+    "background": {
+      "base": "#09090b",
+      "surface": "#18181b",
+      "elevated": "#27272a"
+    },
+    "primary": {
+      "default": "#f59e0b",
+      "foreground": "#000000",
+      "hover": "#fbbf24"
+    },
+    "secondary": {
+      "default": "#a1a1aa",
+      "foreground": "#000000"
+    },
+    "accent": {
+      "blueprint": "#38bdf8",
+      "concrete": "#a1a1aa",
+      "danger": "#ef4444",
+      "success": "#10b981",
+      "hot_lead": "#f97316"
+    },
+    "text": {
+      "primary": "#f4f4f5",
+      "secondary": "#a1a1aa",
+      "muted": "#71717a"
+    },
+    "border": {
+      "default": "rgba(255, 255, 255, 0.1)",
+      "hover": "rgba(255, 255, 255, 0.2)",
+      "focus": "#f59e0b"
+    }
+  },
+  "spacing_and_layout": {
+    "container_padding": "p-4 md:p-6",
+    "grid_system": "Control Room Grid Protocol: Dense, gap-4 to gap-6. Use col-span logic to pack data tightly.",
+    "border_radius": "rounded-none to rounded-sm (2px max) for a sharp, architectural aesthetic.",
+    "alignment": "Optical alignment, left-aligned tabular data, right-aligned numeric data."
+  },
+  "surface_strategies": {
+    "cards": "Flat solid background (surface: #18181b), 1px solid border-white/10. No dropshadows. Rely on 1px borders for definition.",
+    "tables": "Grid Borders style. Visible skeleton, border-collapse, mono font for numbers. Alternate row bg-white/[0.02].",
+    "headers": "Solid elevated background (#09090b) with hard 1px bottom border. No glassmorphism."
+  },
+  "component_styling": {
+    "buttons": "Sharp corners. Primary: bg-amber-500 text-black font-semibold hover:bg-amber-400. Secondary: border border-white/20 hover:bg-white/5.",
+    "kanban_cards": "Dense surface cards, 2px solid left border indicating status (e.g., green=won, amber=negotiation).",
+    "map_pins": "Sharp geometric markers, pulsing dot for 'Hot' opportunities (AI Score > 80).",
+    "kpi_cards": "Large mono-font numeric readouts, subtle trend sparklines, highly structured layout.",
+    "quotation_form": "Shadcn input fields with reduced height (h-8), no rounded corners, tight labels."
+  },
+  "motion_and_interactions": {
+    "hover_states": "Micro-interactions: Border color shifts to white/40. No bouncy scaling. Purely functional feedback.",
+    "transitions": "Fast, precise, 150ms ease-in-out.",
+    "loading": "Terminal-style ASCII loaders or rapid linear progress bars."
+  },
+  "icons": {
+    "library": "lucide-react",
+    "usage": "Stroke-width 1.5. Purely functional, no decorative fluff."
+  },
+  "accessibility_and_testing": {
+    "contrast": "APCA standards required. High contrast text on dark backgrounds.",
+    "test_attributes": "All interactive elements MUST include data-testid with kebab-case (e.g., data-testid='submit-quote-btn')."
+  },
+  "image_urls": {
+    "auth_background": {
+      "url": "https://images.pexels.com/photos/4170184/pexels-photo-4170184.jpeg",
+      "description": "Aerial view of active construction site. Use with a heavy dark overlay (bg-black/80) for the login screen background."
+    },
+    "dashboard_texture": {
+      "url": "https://images.pexels.com/photos/2455119/pexels-photo-2455119.jpeg",
+      "description": "Textured grey concrete wall. Use as a very subtle background layer (opacity-5) in empty states or specific modal backgrounds."
+    },
+    "map_context_queretaro": {
+      "url": "https://images.unsplash.com/photo-1722632713802-fcb3cc28ba72",
+      "description": "Queretaro city context. Can be used subtly in the map UI header."
+    },
+    "radar_blueprint_bg": {
+      "url": "https://images.unsplash.com/photo-1721244654392-9c912a6eb236",
+      "description": "Blueprint architecture. Overlay with mix-blend-screen and 10% opacity in the Project Radar section."
+    },
+    "project_thumbnail_1": {
+      "url": "https://images.unsplash.com/photo-1623428454599-0b106ed85f67",
+      "description": "Aerial tractor view. Use as a thumbnail for detected projects in the Radar grid."
+    },
+    "project_thumbnail_2": {
+      "url": "https://images.pexels.com/photos/25461690/pexels-photo-25461690.jpeg",
+      "description": "Drone shot of large site. Use as an alternative project thumbnail."
+    },
+    "executive_director": {
+      "url": "https://images.unsplash.com/photo-1648448942248-3db31fc7bd7d",
+      "description": "Executive portrait for the 'Director General' role avatar."
+    },
+    "executive_comercial": {
+      "url": "https://images.unsplash.com/photo-1648448942225-7aa06c7e8f79",
+      "description": "Executive portrait for the 'Comercial' or 'Operaciones' role avatar."
+    }
+  },
+  "instructions_to_main_agent": [
+    "Implement a strict 'Control Room' dense grid layout for the dashboards. Maximize data density.",
+    "Use pure HTML+Tailwind for main structural layouts to allow precision, and heavily customize Shadcn components (strip radii, enforce mono fonts for numbers) to match the industrial look.",
+    "Quotation Tool: Build a robust form calculating real-time m2 costs. Use IBM Plex Mono for all numeric readouts.",
+    "Project Radar: Prominently display the AI scoring (0-100). Use conditional coloring (Red/Amber/Green) for scores.",
+    "Interactive Map: Use a dark-themed map (e.g., styled Leaflet or Mapbox Dark) with custom Lucide pins.",
+    "DO NOT use Inter or Roboto. Integrate Chivo (Headings), IBM Plex Sans (Body), and IBM Plex Mono (Data).",
+    "Enforce data-testid on all interactive elements for testing.",
+    "Do not use generic SaaS gradients (no purple/teal). Stick strictly to the Slate/Amber palette."
+  ]
+}
