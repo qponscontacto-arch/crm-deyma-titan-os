@@ -42,6 +42,12 @@ TWILIO_FROM = os.environ.get('TWILIO_WHATSAPP_FROM', '')
 DEYMA_ALERT_PHONE = os.environ.get('DEYMA_ALERT_PHONE', '')
 TWILIO_ENABLED = bool(TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM and DEYMA_ALERT_PHONE)
 
+# SendGrid (mock when keys missing)
+SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '')
+SENDGRID_FROM_EMAIL = os.environ.get('SENDGRID_FROM_EMAIL', '')
+SENDGRID_FROM_NAME = os.environ.get('SENDGRID_FROM_NAME', 'DEYMA Cotizaciones')
+SENDGRID_ENABLED = bool(SENDGRID_API_KEY and SENDGRID_FROM_EMAIL)
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("deyma")
 
@@ -239,7 +245,7 @@ class Cotizacion(BaseModel):
     total: float
     notas: Optional[str] = None
     validez_dias: int
-    estado: Literal["borrador", "enviada", "aceptada", "rechazada"] = "borrador"
+    estado: Literal["borrador", "aprobada_direccion", "enviada", "aceptada", "rechazada"] = "borrador"
     owner_id: str
     created_at: str
 
@@ -1504,6 +1510,280 @@ async def score_and_alert(oid: str, user: dict = Depends(get_current_user)):
         alert = await create_hot_alert("oportunidad", oid, op["titulo"], result["score"],
                                        op["monto_estimado"], op["sector"], emp.get("ciudad", "Querétaro"))
     return {"score": result, "alert": alert}
+
+
+# ----------------------------------------------------------------------------
+# V3.5: SendGrid email service (with MOCK fallback)
+# ----------------------------------------------------------------------------
+async def send_email_sendgrid(to: str, subject: str, html: str, plain: str = None,
+                              cc: List[str] = None, attachments: List[dict] = None) -> dict:
+    """Send transactional email via SendGrid. Falls back to MOCK if creds missing."""
+    if not SENDGRID_ENABLED:
+        logger.info(f"[EMAIL MOCK] → {to} | {subject[:50]}")
+        return {"mock": True, "to": to, "subject": subject, "status": "queued_mock"}
+    try:
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import (Mail, Email, To, Cc, Content, Attachment,
+                                            FileContent, FileName, FileType, Disposition)
+        import base64
+        message = Mail(
+            from_email=Email(SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME),
+            to_emails=To(to),
+            subject=subject,
+            html_content=Content("text/html", html or "") if html else None,
+            plain_text_content=Content("text/plain", plain) if plain else None,
+        )
+        if cc:
+            for c in cc:
+                message.add_cc(Cc(c))
+        if attachments:
+            for att in attachments:
+                content_b64 = att.get("content_base64") or base64.b64encode(att.get("content", b"")).decode()
+                a = Attachment(
+                    FileContent(content_b64),
+                    FileName(att.get("filename", "attachment")),
+                    FileType(att.get("content_type", "application/octet-stream")),
+                    Disposition("attachment"),
+                )
+                message.add_attachment(a)
+
+        def _send():
+            sg = SendGridAPIClient(SENDGRID_API_KEY)
+            return sg.send(message)
+
+        resp = await asyncio.to_thread(_send)
+        return {"mock": False, "status_code": resp.status_code, "to": to, "status": "sent" if resp.status_code in (200, 201, 202) else "failed"}
+    except Exception as e:
+        logger.exception("SendGrid send error")
+        return {"mock": False, "error": str(e), "status": "failed", "to": to}
+
+
+# ----------------------------------------------------------------------------
+# V3.5: Panel de Seguimiento a Cotizaciones
+# ----------------------------------------------------------------------------
+class AprobarEnviarIn(BaseModel):
+    to: EmailStr
+    cc: Optional[List[EmailStr]] = []
+    subject: str
+    body_html: str
+    body_text: Optional[str] = None
+    adjuntar_pdf: bool = True
+
+
+class RegistrarRespuestaIn(BaseModel):
+    de: str  # nombre o correo del remitente
+    de_email: Optional[EmailStr] = None
+    asunto: str
+    contenido: str
+    fecha: Optional[str] = None  # ISO; default ahora
+    adjuntos: Optional[List[dict]] = []  # [{nombre, tipo, tamano_bytes}]
+    sentimiento: Optional[Literal["positivo", "neutro", "negativo"]] = "neutro"
+
+
+class MarcarEstadoIn(BaseModel):
+    estado: Literal["aceptada", "rechazada"]
+    nota: Optional[str] = None
+
+
+def _history_entry(actor: dict, tipo: str, detalle: str, meta: dict = None) -> dict:
+    return {
+        "id": new_id(),
+        "tipo": tipo,
+        "detalle": detalle,
+        "actor_id": actor.get("id"),
+        "actor_name": actor.get("name", ""),
+        "actor_role": actor.get("role", ""),
+        "ts": iso(now_utc()),
+        "meta": meta or {},
+    }
+
+
+@api.get("/cotizaciones/{cid}/email-template")
+async def get_email_template(cid: str, user: dict = Depends(get_current_user)):
+    """Returns a prefilled template (subject + html + text) that the user can edit before sending."""
+    cot = await db.cotizaciones.find_one({"id": cid}, {"_id": 0})
+    if not cot:
+        raise HTTPException(status_code=404, detail="Cotización no encontrada")
+    emp = await db.empresas.find_one({"id": cot["empresa_id"]}, {"_id": 0}) or {}
+    cont = await db.contactos.find_one({"empresa_id": cot["empresa_id"]}, {"_id": 0}) or {}
+    subject = f"Cotización {cot['folio']} — {cot['proyecto_titulo']} · DEYMA"
+    saludo = (cont.get("nombre") or emp.get("nombre") or "Estimado(a) cliente").split()[0]
+    items_html = "".join(
+        f"<tr><td style='padding:6px 8px;border-bottom:1px solid #eee'>{it['descripcion']}</td>"
+        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right;font-family:monospace'>{it['cantidad']:,.2f} {it['unidad']}</td>"
+        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right;font-family:monospace'>${it['cantidad']*it['precio_unitario']:,.2f}</td></tr>"
+        for it in cot["items"]
+    )
+    body_html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#222;max-width:640px;margin:auto">
+<div style="border-top:4px solid #f59e0b;padding-top:18px">
+  <h2 style="margin:0 0 4px"><span style="color:#f59e0b">DEYMA</span> <span style="color:#71717a">· RADAR</span></h2>
+  <p style="color:#71717a;font-size:11px;letter-spacing:.12em;margin:0">CONSTRUCCIÓN INDUSTRIAL · QUERÉTARO · BAJÍO</p>
+</div>
+<p>Estimado(a) {saludo}:</p>
+<p>Le hacemos llegar nuestra <b>cotización formal {cot['folio']}</b> para el proyecto <b>{cot['proyecto_titulo']}</b>.</p>
+<p>Resumen de partidas:</p>
+<table style="border-collapse:collapse;width:100%;font-size:13px;margin:8px 0">
+<thead><tr style="background:#18181b;color:#fff"><th style="padding:8px;text-align:left">Concepto</th><th style="padding:8px;text-align:right">Cantidad</th><th style="padding:8px;text-align:right">Subtotal</th></tr></thead>
+<tbody>{items_html}</tbody>
+</table>
+<table style="width:100%;font-size:13px;margin-top:8px"><tbody>
+<tr><td style="text-align:right;padding:4px;color:#71717a">Subtotal</td><td style="text-align:right;padding:4px;font-family:monospace;width:140px">${cot['subtotal']:,.2f}</td></tr>
+<tr><td style="text-align:right;padding:4px;color:#71717a">IVA ({cot['iva_pct']}%)</td><td style="text-align:right;padding:4px;font-family:monospace">${cot['iva_monto']:,.2f}</td></tr>
+<tr><td style="text-align:right;padding:6px;font-weight:bold;color:#f59e0b">TOTAL MXN</td><td style="text-align:right;padding:6px;font-family:monospace;font-weight:bold;color:#f59e0b;font-size:16px">${cot['total']:,.2f}</td></tr>
+</tbody></table>
+<p>Vigencia: <b>{cot['validez_dias']} días naturales</b>. Adjunto encontrará el PDF formal con condiciones comerciales completas.</p>
+<p>Quedo atento a sus comentarios para agendar una visita técnica y avanzar con la programación de la obra.</p>
+<p style="margin-top:24px">Saludos cordiales,<br/><b>{cot.get('owner_name') or 'Equipo DEYMA'}</b><br/>
+<span style="color:#71717a;font-size:12px">DEYMA Construcciones S.A. de C.V. · cotizaciones@deyma.mx</span></p>
+</body></html>"""
+    body_text = (
+        f"Estimado(a) {saludo}:\n\n"
+        f"Le hacemos llegar nuestra cotización formal {cot['folio']} para el proyecto {cot['proyecto_titulo']}.\n\n"
+        f"Subtotal: ${cot['subtotal']:,.2f}\nIVA ({cot['iva_pct']}%): ${cot['iva_monto']:,.2f}\nTOTAL MXN: ${cot['total']:,.2f}\n\n"
+        f"Vigencia: {cot['validez_dias']} días. Adjunto el PDF formal.\n\n"
+        "Saludos cordiales,\nEquipo DEYMA"
+    )
+    return {
+        "to": cont.get("email") or "",
+        "cc": [],
+        "subject": subject,
+        "body_html": body_html,
+        "body_text": body_text,
+    }
+
+
+@api.post("/cotizaciones/{cid}/aprobar-enviar")
+async def aprobar_enviar(cid: str, body: AprobarEnviarIn,
+                         user: dict = Depends(require_roles("director", "comercial"))):
+    cot = await db.cotizaciones.find_one({"id": cid}, {"_id": 0})
+    if not cot:
+        raise HTTPException(status_code=404, detail="Cotización no encontrada")
+    if cot.get("estado") in ("aceptada", "rechazada"):
+        raise HTTPException(status_code=400, detail=f"Cotización ya está en estado final ({cot.get('estado')})")
+
+    # Preparar adjuntos: PDF cotización
+    attachments = []
+    if body.adjuntar_pdf:
+        emp = await db.empresas.find_one({"id": cot["empresa_id"]}, {"_id": 0}) or {}
+        cont = await db.contactos.find_one({"empresa_id": cot["empresa_id"]}, {"_id": 0}) or {}
+        pdf_bytes = await asyncio.to_thread(_build_cotizacion_pdf, cot, emp, cont, user)
+        import base64 as _b64
+        attachments.append({
+            "content_base64": _b64.b64encode(pdf_bytes).decode(),
+            "filename": f"cotizacion_{cot['folio']}.pdf",
+            "content_type": "application/pdf",
+        })
+
+    cc_list = list(body.cc or [])
+    send_result = await send_email_sendgrid(
+        to=body.to, subject=body.subject, html=body.body_html, plain=body.body_text,
+        cc=cc_list, attachments=attachments,
+    )
+
+    outbound = {
+        "id": new_id(),
+        "to": body.to,
+        "cc": cc_list,
+        "subject": body.subject,
+        "body_html": body.body_html,
+        "body_text": body.body_text or "",
+        "sent_at": iso(now_utc()),
+        "sent_by": user.get("id"),
+        "sent_by_name": user.get("name"),
+        "sent_by_role": user.get("role"),
+        "status": send_result.get("status", "unknown"),
+        "mock": send_result.get("mock", True),
+        "attachments": [{"filename": a["filename"], "content_type": a["content_type"]} for a in attachments],
+        "error": send_result.get("error"),
+    }
+
+    historia_entry = _history_entry(
+        user, "aprobacion_envio",
+        f"Cotización aprobada y enviada a {body.to}" + (" (MOCK)" if send_result.get("mock") else ""),
+        {"to": body.to, "subject": body.subject, "status": outbound["status"]},
+    )
+
+    await db.cotizaciones.update_one(
+        {"id": cid},
+        {
+            "$set": {"estado": "aprobada_direccion", "aprobada_at": iso(now_utc()),
+                     "aprobada_por": user.get("id"), "aprobada_por_name": user.get("name")},
+            "$push": {"outbound_emails": outbound, "historia": historia_entry},
+        },
+    )
+    return {"ok": True, "outbound": outbound, "mock": send_result.get("mock", True)}
+
+
+@api.post("/cotizaciones/{cid}/respuesta")
+async def registrar_respuesta(cid: str, body: RegistrarRespuestaIn,
+                              user: dict = Depends(require_roles("director", "comercial"))):
+    cot = await db.cotizaciones.find_one({"id": cid}, {"_id": 0})
+    if not cot:
+        raise HTTPException(status_code=404, detail="Cotización no encontrada")
+    inbound = {
+        "id": new_id(),
+        "de": body.de,
+        "de_email": body.de_email,
+        "asunto": body.asunto,
+        "contenido": body.contenido,
+        "fecha": body.fecha or iso(now_utc()),
+        "adjuntos": body.adjuntos or [],
+        "sentimiento": body.sentimiento or "neutro",
+        "registrado_por": user.get("id"),
+        "registrado_por_name": user.get("name"),
+        "registrado_at": iso(now_utc()),
+    }
+    historia_entry = _history_entry(
+        user, "respuesta_cliente",
+        f"Respuesta del cliente registrada: {body.asunto[:60]}",
+        {"de": body.de, "sentimiento": body.sentimiento},
+    )
+    await db.cotizaciones.update_one(
+        {"id": cid},
+        {"$push": {"inbound_replies": inbound, "historia": historia_entry}},
+    )
+    return inbound
+
+
+@api.post("/cotizaciones/{cid}/marcar")
+async def marcar_estado(cid: str, body: MarcarEstadoIn,
+                        user: dict = Depends(require_roles("director", "comercial"))):
+    cot = await db.cotizaciones.find_one({"id": cid}, {"_id": 0})
+    if not cot:
+        raise HTTPException(status_code=404, detail="Cotización no encontrada")
+    historia_entry = _history_entry(
+        user, "cambio_estado",
+        f"Cotización marcada como {body.estado.upper()}" + (f": {body.nota}" if body.nota else ""),
+        {"estado_anterior": cot.get("estado"), "estado_nuevo": body.estado},
+    )
+    upd = {"estado": body.estado, "cerrada_at": iso(now_utc()),
+           "cerrada_por": user.get("id"), "cerrada_por_name": user.get("name")}
+    if body.nota:
+        upd["nota_cierre"] = body.nota
+    await db.cotizaciones.update_one(
+        {"id": cid},
+        {"$set": upd, "$push": {"historia": historia_entry}},
+    )
+    return {"ok": True, "estado": body.estado}
+
+
+@api.get("/cotizaciones/{cid}/seguimiento")
+async def get_seguimiento(cid: str, user: dict = Depends(get_current_user)):
+    cot = await db.cotizaciones.find_one({"id": cid}, {"_id": 0})
+    if not cot:
+        raise HTTPException(status_code=404, detail="Cotización no encontrada")
+    emp = await db.empresas.find_one({"id": cot["empresa_id"]}, {"_id": 0}) or {}
+    cont = await db.contactos.find_one({"empresa_id": cot["empresa_id"]}, {"_id": 0}) or {}
+    return {
+        "cotizacion": cot,
+        "empresa": emp,
+        "contacto": cont,
+        "outbound_emails": cot.get("outbound_emails", []),
+        "inbound_replies": cot.get("inbound_replies", []),
+        "historia": cot.get("historia", []),
+        "sendgrid_enabled": SENDGRID_ENABLED,
+        "sendgrid_from": SENDGRID_FROM_EMAIL or None,
+    }
 
 
 # ----------------------------------------------------------------------------

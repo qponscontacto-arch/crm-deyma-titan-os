@@ -1,0 +1,45 @@
+{
+  "summary": "V3.5 Panel de Seguimiento a Cotizaciones tested end-to-end. Backend: 10/10 new pytest cases PASS in /app/backend/tests/test_v35_seguimiento.py covering regression (director login + >=3 seed cotizaciones with folio DEY-YYYY-#### format), GET /email-template (shape, folio in subject, valid HTML with table/h2/p, body_text starts with 'Estimado(a)'), POST /aprobar-enviar for director (200, status=queued_mock, mock=true, attachments contains cotizacion_FOLIO.pdf application/pdf, estado→aprobada_direccion) and comercial (sent_by_role=comercial), 403 for operaciones, 400 blocking re-aprobacion when estado is final, POST /respuesta for comercial (200, registrado_por_name set) and 403 for operaciones, POST /marcar aceptada+nota (200, estado=aceptada), GET /seguimiento returns sendgrid_enabled=false, sendgrid_from=null, outbound_emails>=1, inbound_replies>=1, historia covers {aprobacion_envio, respuesta_cliente, cambio_estado}. Full regression (V1+V2+V3): 49 passed, 1 skipped, 1 transient 502 on /api/scraper/score-batch (unrelated, infra timeout). Frontend Playwright (director on /cotizador): cotizador-page renders, 7 cot rows, seguimiento-cot-{id} (Eye icon) and download-cot-{id} (Download icon) both present per row, badge 'APROBADA · ENVIADA' visible for previously-approved cotizacion. Click seguimiento-cot opens seguimiento-modal. 4 tabs (seg-tab-resumen/correos/respuestas/historia) render after data loads. open-composer-btn pre-fills subject (48 chars), body_html (2269 chars). composer-send-btn changes estado to 'APROBADA · ENVIADA' immediately. Tab navigation works. Reply form opens; marcar buttons render.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/scraper/score-batch", "issue": "Transient 502 (Cloudflare HTML body) during full regression run — likely ingress timeout because batch can take 60-300s. Not a V3.5 issue; pre-existing from V3."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "POST /api/cotizaciones/{id}/respuesta from reply-form-modal", "issue": "When the cotización's contact has no email on file (or user leaves DE_EMAIL empty), the frontend submits `de_email: \"\"` (empty string) instead of omitting the field. Backend Pydantic `Optional[EmailStr] = None` rejects empty string → 422 'value is not a valid email address: An email address must have an @-sign.'. The reply-form-modal stays open with red error and the inbound entry is NOT created, blocking the user from registering responses for cotizaciones whose contact lacks an email. Reproduced: open seguimiento → tab Respuestas → Registrar respuesta del cliente → leave EMAIL DEL REMITENTE empty → click Registrar respuesta → 422.", "affected_selectors": ["[data-testid='reply-form']", "[data-testid='reply-de-email']", "[data-testid='reply-save-btn']"], "priority": "HIGH"}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v35_seguimiento.py",
+    "/app/test_reports/pytest/pytest_v35_results.xml"
+  ],
+  "action_items": [
+    "(HIGH) Fix POST /respuesta 422 when de_email empty. Two options: (a) Frontend ReplyForm submit() should strip/omit `de_email` if it is empty string (preferred — payload semantics correct), or (b) Backend RegistrarRespuestaIn coerce empty string → None via a validator (e.g. @field_validator('de_email', mode='before')) so `Optional[EmailStr]` accepts both empty string and None. Recommend (a)+(b) for defense in depth. File: /app/frontend/src/components/SeguimientoCotizacionModal.jsx around line 340 (ReplyForm submit) and /app/backend/server.py RegistrarRespuestaIn model (~line 1573).",
+    "(LOW) /api/scraper/score-batch regression test occasionally times out at ingress (502) when there are many score=0 items. Consider batching internally or returning 202 with a job id."
+  ],
+  "critical_code_review_comments": [
+    "Bug RCA — Frontend integration: ReplyForm pre-fills `de_email: cont.email || \"\"` (SeguimientoCotizacionModal.jsx line 99). When cont.email is falsy this stays as \"\". On submit, the payload object contains `de_email: \"\"` which Pydantic EmailStr rejects with 422. Robust fix: build payload with `...(de_email ? { de_email } : {})` spread, OR add a backend pre-validator that converts empty string to None.",
+    "server.py now 2069 lines (was 1790 in V3). The V3.5 Panel de Seguimiento block adds 230 lines (1561–1786). Strongly recommend extracting to /app/backend/routers/cotizaciones_seguimiento.py and /app/backend/services/email_template.py before V4 — the file is becoming hard to navigate.",
+    "send_email_sendgrid: when SENDGRID is enabled and `plain_text_content` is None but `html_content` is also None, the function builds a Mail without any content body — SendGrid will reject. Add an explicit guard or always ensure at least one of html/plain is set.",
+    "aprobar-enviar persists raw HTML body (2-3KB each) into the Cotizacion document's outbound_emails array. Over many sends this bloats the document past Mongo's 16MB doc limit for large templates. Consider storing only a hash/preview in the cot doc and full bodies in a separate `outbound_emails` collection keyed by cotizacion_id.",
+    "_history_entry stores `actor_name` and `actor_role` but no provider/IP/user-agent — for an auditable approval flow consider adding request metadata.",
+    "ReplyForm date-input uses HTML `<input type='datetime-local'>` which renders the browser default picker. Spec note in system prompt prefers shadcn calendar; not blocking but inconsistent with rest of UI.",
+    "SeguimientoCotizacionModal.jsx is 396 lines and bundles Resumen, Correos, Respuestas, Historia, Composer, ReplyForm and MarcarModal in one file. Split each into its own component for maintainability.",
+    "Frontend Resumen tab does not show inbound_replies sentiment summary — minor UX gap.",
+    "CotizadorPage ESTADO_BADGE map should include 'enviada' (still in Literal but no entry). Currently only borrador/aprobada_direccion/aceptada/rechazada have badges, so an 'enviada' cot (legacy data) would show `badge undefined`."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v35_seguimiento.py (new file — 10 V3.5 backend tests; creates 2 TEST_ cotizaciones per run)"
+  ],
+  "success_rate": {"backend": "100% (10/10 V3.5 tests + 49/50 full regression — 1 transient 502)", "frontend": "85% (open/list/seguimiento-modal/composer/aprobar-enviar/marcar all OK; reply registration BLOCKED by 422 when contact email empty)"},
+  "test_credentials": "director@deyma.mx/Deyma2026! (approves+marks+replies), comercial@deyma.mx/Comercial2026! (same), operaciones@deyma.mx/Operaciones2026! (403 on /aprobar-enviar and /respuesta) — all verified.",
+  "seed_data_creation": "Each test run creates 2 TEST_v35-prefixed borrador cotizaciones via POST /api/cotizaciones (so /cotizaciones list grows on every regression). Recommend a teardown that deletes TEST_v35* cotizaciones — currently absent. Not blocking but accumulates over time.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "V3.5 backend is solid; only HIGH-priority bug is the frontend empty `de_email` payload causing 422 on /respuesta. After E1 fixes (likely frontend ReplyForm submit, optionally backend validator), retest by opening /cotizador → seguimiento → tab Respuestas → Registrar respuesta with EMAIL DEL REMITENTE field LEFT EMPTY → should succeed with 200 and create the inbound entry. Backend regression run: `pytest /app/backend/tests/test_v35_seguimiento.py /app/backend/tests/test_v3_features.py /app/backend/tests/test_v2_features.py /app/backend/tests/backend_test.py -v --tb=short --timeout=300`. SendGrid stays MOCK (SENDGRID_API_KEY+SENDGRID_FROM_EMAIL empty). Twilio MOCK (V2). seed_admin idempotent. Watch out for accumulating TEST_v35 cotizaciones.",
+  "rca of the issue": "Bug: POST /api/cotizaciones/{id}/respuesta returns 422 when the cot's contact has no email. Reproduction: 1) login director, 2) /cotizador → click seguimiento on any cot whose contact lacks email, 3) tab Respuestas → 'Registrar respuesta del cliente' → fill DE (nombre), ASUNTO, CONTENIDO; leave EMAIL DEL REMITENTE empty, 4) click REGISTRAR RESPUESTA → 422 banner 'value is not a valid email address: An email address must have an @-sign.'. RCA: /app/frontend/src/components/SeguimientoCotizacionModal.jsx line 99 initializes the form with `de_email: cont.email || \"\"`. On submit (~line 358 — `reply-save-btn`), the entire `data` state object is POSTed verbatim, so empty string `de_email: \"\"` reaches the backend. Backend Pydantic model RegistrarRespuestaIn (/app/backend/server.py line 1575) declares `de_email: Optional[EmailStr] = None` — Pydantic v2 will validate `\"\"` against EmailStr and fail with the 422 above. Mitigation: strip/omit empty string before sending OR add a `mode='before'` validator on the field that returns `None` for empty/whitespace strings. Either is a 3-line fix."
+}

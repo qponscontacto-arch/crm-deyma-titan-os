@@ -1,20 +1,29 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api, fmtMXN, formatApiError, downloadPdf } from "../lib/auth";
 import { Modal, EmptyState } from "../components/ui-deyma";
-import { Plus, Trash2, FileText, Download } from "lucide-react";
+import SeguimientoCotizacionModal from "../components/SeguimientoCotizacionModal";
+import { Plus, Trash2, FileText, Download, Eye } from "lucide-react";
 
 const ESTADO_BADGE = {
   borrador: "text-zinc-400 border-zinc-400/40",
+  aprobada_direccion: "text-sky-400 border-sky-400/40",
   enviada: "text-sky-400 border-sky-400/40",
   aceptada: "text-emerald-400 border-emerald-400/40",
   rechazada: "text-rose-400 border-rose-400/40",
+};
+const ESTADO_LABEL_SHORT = {
+  borrador: "BORRADOR",
+  aprobada_direccion: "APROBADA · ENVIADA",
+  enviada: "ENVIADA",
+  aceptada: "ACEPTADA",
+  rechazada: "RECHAZADA",
 };
 
 export default function CotizadorPage() {
   const [cots, setCots] = useState([]);
   const [empresas, setEmpresas] = useState([]);
   const [open, setOpen] = useState(false);
-  const [preview, setPreview] = useState(null);
+  const [seguimientoId, setSeguimientoId] = useState(null);
 
   const load = async () => {
     const [c, e] = await Promise.all([api.get("/cotizaciones"), api.get("/empresas")]);
@@ -47,11 +56,11 @@ export default function CotizadorPage() {
                   <td className="font-mono text-right">{fmtMXN(c.subtotal)}</td>
                   <td className="font-mono text-right text-xs text-zinc-500">{fmtMXN(c.iva_monto)}</td>
                   <td className="font-mono text-right font-semibold text-amber-400">{fmtMXN(c.total)}</td>
-                  <td><span className={`badge ${ESTADO_BADGE[c.estado]}`}>{c.estado.toUpperCase()}</span></td>
+                  <td><span className={`badge ${ESTADO_BADGE[c.estado]}`}>{ESTADO_LABEL_SHORT[c.estado] || c.estado.toUpperCase()}</span></td>
                   <td className="font-mono text-xs text-zinc-500">{new Date(c.created_at).toLocaleDateString("es-MX")}</td>
                   <td className="flex items-center gap-2">
-                    <button data-testid={`view-cot-${c.id}`} onClick={() => setPreview(c)} className="text-sky-400 hover:text-sky-300" title="Vista previa"><FileText size={14}/></button>
-                    <button data-testid={`download-cot-${c.id}`} onClick={() => downloadPdf(`/cotizaciones/${c.id}/pdf`, `cotizacion_${c.folio}.pdf`)} className="text-amber-400 hover:text-amber-300" title="Descargar PDF"><Download size={14}/></button>
+                    <button data-testid={`seguimiento-cot-${c.id}`} onClick={() => setSeguimientoId(c.id)} className="text-amber-400 hover:text-amber-300" title="Panel de Seguimiento"><Eye size={14}/></button>
+                    <button data-testid={`download-cot-${c.id}`} onClick={() => downloadPdf(`/cotizaciones/${c.id}/pdf`, `cotizacion_${c.folio}.pdf`)} className="text-sky-400 hover:text-sky-300" title="Descargar PDF"><Download size={14}/></button>
                   </td>
                 </tr>
               ))}
@@ -62,46 +71,12 @@ export default function CotizadorPage() {
 
       <NewCotModal open={open} onClose={() => setOpen(false)} empresas={empresas} onSaved={() => { setOpen(false); load(); }} />
 
-      <Modal open={!!preview} onClose={() => setPreview(null)} title={`Cotización ${preview?.folio || ""}`} size="lg" testId="cot-preview-modal">
-        {preview && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div><div className="label-overline">Cliente</div><div className="font-semibold">{empName(preview.empresa_id)}</div></div>
-              <div><div className="label-overline">Proyecto</div><div className="font-semibold">{preview.proyecto_titulo}</div></div>
-              <div><div className="label-overline">Folio</div><div className="font-mono text-amber-400">{preview.folio}</div></div>
-              <div><div className="label-overline">Validez</div><div className="font-mono">{preview.validez_dias} días</div></div>
-            </div>
-            <table className="dtable">
-              <thead><tr><th>Descripción</th><th className="text-right">Cant.</th><th>Unidad</th><th className="text-right">P. Unit.</th><th className="text-right">Subtotal</th></tr></thead>
-              <tbody>
-                {preview.items.map((it, i) => (
-                  <tr key={i}>
-                    <td>{it.descripcion}</td>
-                    <td className="font-mono text-right">{it.cantidad.toLocaleString("es-MX")}</td>
-                    <td className="text-xs">{it.unidad}</td>
-                    <td className="font-mono text-right">{fmtMXN(it.precio_unitario)}</td>
-                    <td className="font-mono text-right">{fmtMXN(it.cantidad * it.precio_unitario)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="flex justify-end">
-              <div className="surface-elev p-4 w-72 space-y-2">
-                <Row k="Subtotal" v={fmtMXN(preview.subtotal)} />
-                <Row k={`IVA (${preview.iva_pct}%)`} v={fmtMXN(preview.iva_monto)} />
-                <div className="divider" />
-                <Row k="TOTAL" v={fmtMXN(preview.total)} big />
-              </div>
-            </div>
-            {preview.notas && <div><div className="label-overline">Notas</div><p className="text-xs text-zinc-400">{preview.notas}</p></div>}
-            <div className="flex justify-end pt-2">
-              <button data-testid="preview-download-pdf" onClick={() => downloadPdf(`/cotizaciones/${preview.id}/pdf`, `cotizacion_${preview.folio}.pdf`)} className="btn-primary flex items-center gap-2">
-                <Download size={14}/> Descargar PDF
-              </button>
-            </div>
-          </div>
-        )}
-      </Modal>
+      <SeguimientoCotizacionModal
+        open={!!seguimientoId}
+        cotizacionId={seguimientoId}
+        onClose={() => setSeguimientoId(null)}
+        onChanged={load}
+      />
     </div>
   );
 }
