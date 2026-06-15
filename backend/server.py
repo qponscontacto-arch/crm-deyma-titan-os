@@ -2916,68 +2916,165 @@ _GEOCODE_CACHE: dict = {}
 
 # Pre-cache de ciudades clave de México (mitiga rate-limit de Nominatim)
 _GEOCODE_SEED = [
-    ("morelia", 19.6546, -101.2624, "Morelia, Michoacán, México"),
-    ("morelia, michoacán", 19.6546, -101.2624, "Morelia, Michoacán, México"),
-    ("morelia, mx", 19.6546, -101.2624, "Morelia, Michoacán, México"),
+    # Bajío (corredor principal DEYMA)
+    ("morelia", 19.7008, -101.1844, "Morelia, Michoacán, México"),
     ("querétaro", 20.5888, -100.3899, "Querétaro, Querétaro, México"),
     ("queretaro", 20.5888, -100.3899, "Querétaro, Querétaro, México"),
-    ("querétaro, querétaro", 20.5888, -100.3899, "Querétaro, Querétaro, México"),
     ("salamanca", 20.5742, -101.196, "Salamanca, Guanajuato, México"),
     ("celaya", 20.5238, -100.815, "Celaya, Guanajuato, México"),
     ("león", 21.1250, -101.6860, "León, Guanajuato, México"),
     ("leon", 21.1250, -101.6860, "León, Guanajuato, México"),
     ("guanajuato", 21.0190, -101.2574, "Guanajuato, Guanajuato, México"),
     ("irapuato", 20.6767, -101.3536, "Irapuato, Guanajuato, México"),
-    ("aguascalientes", 21.8853, -102.2916, "Aguascalientes, Aguascalientes, México"),
-    ("san luis potosí", 22.1565, -100.9855, "San Luis Potosí, SLP, México"),
-    ("san luis potosi", 22.1565, -100.9855, "San Luis Potosí, SLP, México"),
+    ("silao", 20.9382, -101.4286, "Silao, Guanajuato, México"),
+    ("san miguel de allende", 20.9151, -100.7437, "San Miguel de Allende, Guanajuato, México"),
+    # Centro
     ("cdmx", 19.4326, -99.1332, "Ciudad de México, CDMX"),
     ("ciudad de méxico", 19.4326, -99.1332, "Ciudad de México, CDMX"),
     ("ciudad de mexico", 19.4326, -99.1332, "Ciudad de México, CDMX"),
-    ("guadalajara", 20.6597, -103.3496, "Guadalajara, Jalisco, México"),
-    ("monterrey", 25.6866, -100.3161, "Monterrey, Nuevo León, México"),
-    ("puebla", 19.0414, -98.2063, "Puebla, Puebla, México"),
+    ("méxico df", 19.4326, -99.1332, "Ciudad de México, CDMX"),
+    ("mexico df", 19.4326, -99.1332, "Ciudad de México, CDMX"),
     ("toluca", 19.2826, -99.6557, "Toluca, Estado de México"),
-    ("zacatecas", 22.7709, -102.5832, "Zacatecas, Zacatecas, México"),
+    ("puebla", 19.0414, -98.2063, "Puebla, Puebla, México"),
+    ("pachuca", 20.1011, -98.7591, "Pachuca, Hidalgo, México"),
+    ("tlaxcala", 19.3139, -98.2404, "Tlaxcala, Tlaxcala, México"),
+    ("cuernavaca", 18.9242, -99.2216, "Cuernavaca, Morelos, México"),
+    ("cuautla", 18.8120, -98.9540, "Cuautla, Morelos, México"),
+    # Occidente / Pacífico
+    ("guadalajara", 20.6597, -103.3496, "Guadalajara, Jalisco, México"),
+    ("zapopan", 20.7239, -103.3848, "Zapopan, Jalisco, México"),
+    ("tlaquepaque", 20.6406, -103.2939, "Tlaquepaque, Jalisco, México"),
+    ("puerto vallarta", 20.6534, -105.2253, "Puerto Vallarta, Jalisco, México"),
     ("uruapan", 19.4119, -102.0517, "Uruapan, Michoacán, México"),
     ("zamora", 19.9836, -102.2832, "Zamora, Michoacán, México"),
     ("la piedad", 20.3447, -102.0292, "La Piedad, Michoacán, México"),
-    ("pachuca", 20.1011, -98.7591, "Pachuca, Hidalgo, México"),
-    ("tlaxcala", 19.3139, -98.2404, "Tlaxcala, Tlaxcala, México"),
+    ("lázaro cárdenas", 17.9583, -102.2008, "Lázaro Cárdenas, Michoacán, México"),
+    ("colima", 19.2433, -103.7264, "Colima, Colima, México"),
+    ("manzanillo", 19.0521, -104.3158, "Manzanillo, Colima, México"),
+    ("tepic", 21.5039, -104.8941, "Tepic, Nayarit, México"),
+    # Norte
+    ("monterrey", 25.6866, -100.3161, "Monterrey, Nuevo León, México"),
+    ("san pedro garza garcía", 25.6594, -100.4022, "San Pedro Garza García, NL, México"),
+    ("apodaca", 25.7820, -100.1888, "Apodaca, Nuevo León, México"),
     ("saltillo", 25.4232, -101.0053, "Saltillo, Coahuila, México"),
+    ("torreón", 25.5428, -103.4068, "Torreón, Coahuila, México"),
+    ("torreon", 25.5428, -103.4068, "Torreón, Coahuila, México"),
+    ("durango", 24.0277, -104.6532, "Durango, Durango, México"),
+    ("chihuahua", 28.6353, -106.0889, "Chihuahua, Chihuahua, México"),
+    ("ciudad juárez", 31.6904, -106.4245, "Ciudad Juárez, Chihuahua, México"),
+    ("ciudad juarez", 31.6904, -106.4245, "Ciudad Juárez, Chihuahua, México"),
+    ("hermosillo", 29.0892, -110.9613, "Hermosillo, Sonora, México"),
+    ("nogales", 31.3168, -110.9442, "Nogales, Sonora, México"),
+    ("ciudad obregón", 27.4828, -109.9404, "Ciudad Obregón, Sonora, México"),
+    ("tijuana", 32.5149, -117.0382, "Tijuana, Baja California, México"),
+    ("mexicali", 32.6519, -115.4683, "Mexicali, Baja California, México"),
+    ("ensenada", 31.8666, -116.5963, "Ensenada, Baja California, México"),
+    ("la paz", 24.1426, -110.3128, "La Paz, Baja California Sur, México"),
+    ("cabo san lucas", 22.8905, -109.9167, "Cabo San Lucas, BCS, México"),
+    ("culiacán", 24.8091, -107.3940, "Culiacán, Sinaloa, México"),
+    ("culiacan", 24.8091, -107.3940, "Culiacán, Sinaloa, México"),
+    ("mazatlán", 23.2494, -106.4111, "Mazatlán, Sinaloa, México"),
+    ("mazatlan", 23.2494, -106.4111, "Mazatlán, Sinaloa, México"),
+    ("los mochis", 25.7906, -108.9947, "Los Mochis, Sinaloa, México"),
+    # Centro-Norte
+    ("aguascalientes", 21.8853, -102.2916, "Aguascalientes, Aguascalientes, México"),
+    ("san luis potosí", 22.1565, -100.9855, "San Luis Potosí, SLP, México"),
+    ("san luis potosi", 22.1565, -100.9855, "San Luis Potosí, SLP, México"),
+    ("zacatecas", 22.7709, -102.5832, "Zacatecas, Zacatecas, México"),
+    ("fresnillo", 23.1747, -102.8662, "Fresnillo, Zacatecas, México"),
+    # Sur / Sureste
+    ("acapulco", 16.8531, -99.8237, "Acapulco, Guerrero, México"),
+    ("chilpancingo", 17.5506, -99.5006, "Chilpancingo, Guerrero, México"),
+    ("oaxaca", 17.0594, -96.7216, "Oaxaca, Oaxaca, México"),
+    ("tuxtla gutiérrez", 16.7531, -93.1153, "Tuxtla Gutiérrez, Chiapas, México"),
+    ("tuxtla gutierrez", 16.7531, -93.1153, "Tuxtla Gutiérrez, Chiapas, México"),
+    ("villahermosa", 17.9869, -92.9469, "Villahermosa, Tabasco, México"),
+    ("veracruz", 19.1738, -96.1342, "Veracruz, Veracruz, México"),
+    ("xalapa", 19.5438, -96.9102, "Xalapa, Veracruz, México"),
+    ("coatzacoalcos", 18.1346, -94.4592, "Coatzacoalcos, Veracruz, México"),
+    ("poza rica", 20.5331, -97.4595, "Poza Rica, Veracruz, México"),
+    ("córdoba", 18.8847, -96.9326, "Córdoba, Veracruz, México"),
+    ("cordoba", 18.8847, -96.9326, "Córdoba, Veracruz, México"),
+    ("mérida", 20.9674, -89.5926, "Mérida, Yucatán, México"),
+    ("merida", 20.9674, -89.5926, "Mérida, Yucatán, México"),
+    ("cancún", 21.1619, -86.8515, "Cancún, Quintana Roo, México"),
+    ("cancun", 21.1619, -86.8515, "Cancún, Quintana Roo, México"),
+    ("playa del carmen", 20.6296, -87.0739, "Playa del Carmen, Quintana Roo, México"),
+    ("chetumal", 18.5001, -88.2961, "Chetumal, Quintana Roo, México"),
+    ("campeche", 19.8301, -90.5349, "Campeche, Campeche, México"),
+    # Tampico / Noreste
+    ("tampico", 22.2553, -97.8686, "Tampico, Tamaulipas, México"),
+    ("ciudad victoria", 23.7369, -99.1411, "Ciudad Victoria, Tamaulipas, México"),
+    ("reynosa", 26.0922, -98.2772, "Reynosa, Tamaulipas, México"),
+    ("matamoros", 25.8693, -97.5025, "Matamoros, Tamaulipas, México"),
+    ("nuevo laredo", 27.4762, -99.5164, "Nuevo Laredo, Tamaulipas, México"),
 ]
 for k, lat, lng, name in _GEOCODE_SEED:
     _GEOCODE_CACHE[k] = {"lat": lat, "lng": lng, "display_name": name}
 
 
 async def _geocode(query: str) -> Optional[dict]:
-    """Geocodifica una dirección/ciudad usando Nominatim (OSM). Devuelve {lat, lng, display_name}."""
+    """Geocodifica una dirección/ciudad. Cache → Nominatim → Photon (fallback). Devuelve {lat, lng, display_name}."""
     if not query:
         return None
     key = query.strip().lower()
     if key in _GEOCODE_CACHE:
         return _GEOCODE_CACHE[key]
+    # match parcial: 'morelia, mich' debería pegar con 'morelia'
+    for k, v in _GEOCODE_CACHE.items():
+        if key.startswith(k) or k.startswith(key):
+            _GEOCODE_CACHE[key] = v
+            return v
     import httpx
+    # 1) Intento Nominatim
     try:
-        async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": "DEYMA-Radar/1.0 (ventas)"}) as cli:
+        async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": "DEYMA-Radar/1.0 ventas@deyma.mx"}) as cli:
             r = await cli.get(f"{NOMINATIM_BASE}/search", params={
                 "q": query, "format": "json", "limit": 1, "countrycodes": "mx", "addressdetails": 1,
             })
-            r.raise_for_status()
-            data = r.json()
-            if not data:
-                return None
-            it = data[0]
-            res = {
-                "lat": float(it["lat"]),
-                "lng": float(it["lon"]),
-                "display_name": it.get("display_name", query),
-            }
-            _GEOCODE_CACHE[key] = res
-            return res
+            if r.status_code == 200:
+                data = r.json()
+                if data:
+                    it = data[0]
+                    res = {"lat": float(it["lat"]), "lng": float(it["lon"]),
+                           "display_name": it.get("display_name", query)}
+                    _GEOCODE_CACHE[key] = res
+                    return res
     except Exception as e:
-        logger.warning(f"geocode error '{query}': {e}")
-        return None
+        logger.warning(f"nominatim error '{query}': {e}")
+    # 2) Fallback Photon Komoot
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cli:
+            r = await cli.get("https://photon.komoot.io/api/", params={
+                "q": query, "limit": 1, "lang": "es",
+            })
+            if r.status_code == 200:
+                data = r.json()
+                feats = data.get("features", [])
+                if feats:
+                    f = feats[0]
+                    coords = f.get("geometry", {}).get("coordinates", [])
+                    if len(coords) == 2:
+                        props = f.get("properties", {})
+                        name = ", ".join(filter(None, [props.get("name"), props.get("city"), props.get("state"), props.get("country")]))
+                        res = {"lat": float(coords[1]), "lng": float(coords[0]),
+                               "display_name": name or query}
+                        _GEOCODE_CACHE[key] = res
+                        return res
+    except Exception as e:
+        logger.warning(f"photon error '{query}': {e}")
+    # 3) Última opción: buscar en empresas registradas por nombre similar
+    emp = await db.empresas.find_one(
+        {"$or": [{"nombre": {"$regex": query, "$options": "i"}},
+                 {"ciudad": {"$regex": query, "$options": "i"}}], "lat": {"$ne": None}},
+        {"_id": 0, "nombre": 1, "ciudad": 1, "estado": 1, "lat": 1, "lng": 1},
+    )
+    if emp and emp.get("lat") and emp.get("lng"):
+        res = {"lat": emp["lat"], "lng": emp["lng"],
+               "display_name": f"{emp.get('ciudad', '')}, {emp.get('estado', '')} (vía empresa registrada)"}
+        _GEOCODE_CACHE[key] = res
+        return res
+    return None
 
 
 async def _osrm_route(coords: List[Tuple[float, float]]) -> Optional[dict]:

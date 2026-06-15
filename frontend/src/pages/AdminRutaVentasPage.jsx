@@ -80,7 +80,17 @@ export default function AdminRutaVentasPage() {
         modo, max_desvio_km: +maxDesvio, max_paradas: +maxParadas, fecha,
       });
       setPlan(data);
-    } catch (e) { setErr(formatApiError(e)); }
+    } catch (e) {
+      const msg = formatApiError(e);
+      // Mensaje amigable si fue geocoding
+      if (msg.toLowerCase().includes("geocodificar")) {
+        setErr(`${msg}. Intenta con una ciudad principal (ej. 'León, Gto' en lugar de un pueblo) o agrega el estado: 'Tijuana, BC'.`);
+      } else if (msg.toLowerCase().includes("timeout") || msg.toLowerCase().includes("504")) {
+        setErr("El servicio externo de mapas tardó demasiado. Intenta de nuevo en 10 segundos.");
+      } else {
+        setErr(msg);
+      }
+    }
     finally { setBusy(false); }
   };
 
