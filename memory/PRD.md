@@ -321,6 +321,21 @@ Wireframes implementados en código (no Figma) en:
 - ✅ **Frontend `/scraper`**: 3 action cards (Ejecutar / Calificar / Enviar) + 4 stats cards (Total radar / Detectados IA / Twilio status / Errores) + panel del último resumen matutino con top 5 + log de ejecuciones.
 - ✅ Testing iter 3: 14/14 backend V3 (100%) + 100% frontend crítico. Bug NaN del mapa **resuelto**.
 
+## 19. V4.9 Autocompletado de ciudades en Ruta de Ventas (15-Feb-2026)
+### Implementado y probado (curl + screenshot)
+- ✅ **Endpoint `GET /api/ruta-ventas/geocode/suggest?q=...`** (roles comercial+director+socio): devuelve hasta 8 sugerencias combinando el cache local de 80+ ciudades MX pre-sembradas + Photon Komoot (filtrado a `countrycode == MX`).
+- ✅ **Componente `<CityAutocomplete>`** en `AdminRutaVentasPage.jsx`: input con debounce 250ms, dropdown estilizado con marcador 📍, navegación por teclado (↑/↓/Enter/Esc), cierre al click fuera, spinner mientras carga.
+- ✅ Aplicado a **Origen** y **Destino**. Botón "Usar mi ubicación" sigue funcionando junto al input.
+- ✅ Fix lateral: Photon estaba rechazando peticiones desde el backend (403). Causa: header `User-Agent` por defecto de httpx + parámetro `lang=es` no soportado. Resuelto añadiendo `User-Agent: DEYMA-Radar/1.0` y eliminando el `lang`. El fallback de `_geocode()` también se beneficia.
+
+### Tests manuales
+- `mor` → Morelia · Zamora · Matamoros · Morelos (cache hit, sin red)
+- `guad` → Guadalajara (cache)
+- `patzcuaro` → Pátzcuaro Michoacán + variantes (Photon fallback)
+- `sayula` → Sayula Jalisco / Sonora / Nuevo León (Photon fallback)
+- `a` → vacío (mínimo 2 caracteres)
+
+
 ## 18. V4.8 Ruta de Ventas IA + Gastos de Viajero (15-Feb-2026)
 ### Implementado y probado (iteration_8.json · 34/36 backend + 100% frontend)
 - ✅ **Ruta de Ventas Inteligente** (`/admin/ruta-ventas`, roles comercial+director+socio): formulario con origen/destino/desvío/paradas + auto-geolocalización. El sistema geocodifica (Nominatim/OSM con cache pre-poblado de 28 ciudades clave de México), calcula ruta vehicular (OSRM público), busca empresas/oportunidades en el corredor con score combinado (radar+monto+etapa CRM+actividad), pasa la lista al agente IA GPT-5.2 (Emergent LLM) que devuelve briefing accionable por parada.

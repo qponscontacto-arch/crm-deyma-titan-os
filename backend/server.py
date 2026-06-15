@@ -3044,9 +3044,12 @@ async def _geocode(query: str) -> Optional[dict]:
         logger.warning(f"nominatim error '{query}': {e}")
     # 2) Fallback Photon Komoot
     try:
-        async with httpx.AsyncClient(timeout=10.0) as cli:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            headers={"User-Agent": "DEYMA-Radar/1.0 (ventas@deyma.mx)"},
+        ) as cli:
             r = await cli.get("https://photon.komoot.io/api/", params={
-                "q": query, "limit": 1, "lang": "es",
+                "q": query, "limit": 1,
             })
             if r.status_code == 200:
                 data = r.json()
@@ -3223,6 +3226,82 @@ class RutaIn(BaseModel):
     nota: Optional[str] = None
 
 
+@api.get("/ruta-ventas/geocode/suggest")
+async def geocode_suggest(q: str, user: dict = Depends(require_ventas)):
+    """Autocompletado de ciudades para Origen/Destino.
+    Combina el cache local (ciudades MX pre-sembradas) + Photon Komoot.
+    Respuesta ligera y rápida: < 8 resultados.
+    """
+    q = (q or "").strip()
+    if len(q) < 2:
+        return {"suggestions": []}
+    qlow = q.lower()
+    out: List[dict] = []
+    seen: set = set()
+
+    # 1) Cache local — instant (ciudades MX clave)
+    matches_starts, matches_contains = [], []
+    for k, v in _GEOCODE_CACHE.items():
+        name = v["display_name"]
+        if name in seen:
+            continue
+        if k.startswith(qlow):
+            matches_starts.append((name, v))
+        elif qlow in k or k in qlow:
+            matches_contains.append((name, v))
+    for name, v in (matches_starts + matches_contains)[:8]:
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append({"label": name, "lat": v["lat"], "lng": v["lng"], "display_name": name})
+
+    # 2) Photon Komoot — completa con resultados externos si hace falta
+    if len(out) < 5:
+        import httpx
+        try:
+            async with httpx.AsyncClient(
+                timeout=4.0,
+                headers={"User-Agent": "DEYMA-Radar/1.0 (ventas@deyma.mx)"},
+            ) as cli:
+                r = await cli.get("https://photon.komoot.io/api/", params={
+                    "q": q, "limit": 8,
+                })
+                if r.status_code == 200:
+                    for f in r.json().get("features", []):
+                        coords = f.get("geometry", {}).get("coordinates", [])
+                        if len(coords) != 2:
+                            continue
+                        props = f.get("properties", {})
+                        country = props.get("country", "") or ""
+                        cc = (props.get("countrycode") or "").upper()
+                        # Solo México (las rutas DEYMA son MX-only)
+                        is_mx = cc == "MX" or ("México" in country) or ("Mexico" in country)
+                        if not is_mx:
+                            continue
+                        parts = [props.get("name"), props.get("city"), props.get("state"), country]
+                        name = ", ".join([p for p in parts if p])
+                        if not name or name in seen:
+                            continue
+                        seen.add(name)
+                        out.append({
+                            "label": name,
+                            "lat": float(coords[1]),
+                            "lng": float(coords[0]),
+                            "display_name": name,
+                            "_mx": True,
+                        })
+                        if len(out) >= 10:
+                            break
+        except Exception as e:
+            logger.warning(f"photon suggest error '{q}': {e}")
+
+    # Ordenar: primero los MX o del cache, luego el resto
+    out.sort(key=lambda x: 0 if x.get("_mx", True) else 1)
+    for o in out:
+        o.pop("_mx", None)
+    return {"suggestions": out[:8]}
+
+
 @api.post("/ruta-ventas/generar")
 async def ruta_generar(payload: RutaIn, user: dict = Depends(require_ventas)):
     """Genera plan de ruta inteligente con IA. NO persiste; solo calcula."""
@@ -3348,6 +3427,115 @@ async def ruta_eliminar(rid: str, user: dict = Depends(require_ventas)):
     if r.deleted_count == 0:
         raise HTTPException(404, "Ruta no encontrada")
     return {"ok": True}
+
+
+VISITA_ESTATUS = {
+    "visitada": ("Visita realizada", "✅"),
+    "no_atendio": ("Cliente no atendió", "🚪"),
+    "reagendada": ("Reagendada para otra fecha", "🔁"),
+    "cancelada": ("Visita cancelada", "❌"),
+}
+
+
+class VisitaIn(BaseModel):
+    estatus: str  # visitada | no_atendio | reagendada | cancelada
+    nota: Optional[str] = ""
+    nueva_fecha: Optional[str] = None  # sólo si estatus=reagendada
+
+
+@api.post("/ruta-ventas/{rid}/parada/{empresa_id}/visita")
+async def marcar_visita(rid: str, empresa_id: str, payload: VisitaIn, user: dict = Depends(require_ventas)):
+    """Marca una parada como gestionada y genera actividad automática en el CRM."""
+    if payload.estatus not in VISITA_ESTATUS:
+        raise HTTPException(400, f"estatus inválido. Válidos: {list(VISITA_ESTATUS.keys())}")
+    ruta = await db.rutas_ventas.find_one({"id": rid}, {"_id": 0})
+    if not ruta:
+        raise HTTPException(404, "Ruta no encontrada")
+    if user["role"] == "comercial" and ruta.get("vendedor_id") != user["id"]:
+        raise HTTPException(403, "No puedes marcar visitas de rutas de otros vendedores")
+    parada = next((p for p in (ruta.get("paradas") or []) if p.get("empresa_id") == empresa_id), None)
+    if not parada:
+        raise HTTPException(404, "Parada no encontrada en esta ruta")
+    if not await db.empresas.find_one({"id": empresa_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(404, "Empresa no encontrada")
+
+    # Buscar mejor oportunidad para enlazar (la más avanzada, abierta)
+    opps = await db.oportunidades.find({"empresa_id": empresa_id}, {"_id": 0}).to_list(50)
+    abiertas = [o for o in opps if o.get("stage") not in ("ganada", "perdida")]
+    opp = None
+    if abiertas:
+        abiertas.sort(key=lambda o: SCORE_ETAPA.get(o.get("stage", ""), 0), reverse=True)
+        opp = abiertas[0]
+    elif opps:
+        opp = opps[0]
+    else:
+        # Crear oportunidad mínima de prospección para poder ligar la actividad
+        opp = {
+            "id": new_id(),
+            "empresa_id": empresa_id,
+            "titulo": f"Prospección visita {ruta.get('fecha', now_utc().strftime('%Y-%m-%d'))}",
+            "sector": "otro",
+            "descripcion": f"Oportunidad creada automáticamente desde plan de ruta {rid[:8]}.",
+            "monto_estimado": 0,
+            "stage": "prospeccion",
+            "probabilidad": 10,
+            "score": 0,
+            "hotness": "cold",
+            "score_reasons": [],
+            "fecha_cierre": None,
+            "owner_id": user["id"],
+            "created_at": iso(now_utc()),
+            "updated_at": iso(now_utc()),
+        }
+        await db.oportunidades.insert_one(opp)
+
+    # Crear actividad de tipo "visita"
+    label, icon = VISITA_ESTATUS[payload.estatus]
+    descripcion = (
+        f"{icon} {label} · {parada.get('empresa_nombre', empresa_id)} "
+        f"· Ruta {ruta.get('fecha', '')} ({ruta.get('origen', {}).get('display_name', '')[:40]})"
+    )
+    if payload.nota:
+        descripcion += f" · Nota: {payload.nota}"
+    if payload.estatus == "reagendada" and payload.nueva_fecha:
+        descripcion += f" · Reprogramada para {payload.nueva_fecha}"
+    act_doc = {
+        "id": new_id(),
+        "oportunidad_id": opp["id"],
+        "tipo": "visita",
+        "fecha": iso(now_utc()),
+        "descripcion": descripcion,
+        "completada": payload.estatus != "reagendada",
+        "owner_id": user["id"],
+        "created_at": iso(now_utc()),
+        "ruta_id": rid,
+        "parada_empresa_id": empresa_id,
+    }
+    await db.actividades.insert_one(act_doc)
+
+    # Actualizar parada en la ruta
+    paradas = ruta.get("paradas") or []
+    for i, p in enumerate(paradas):
+        if p.get("empresa_id") == empresa_id:
+            paradas[i]["visita"] = {
+                "estatus": payload.estatus,
+                "nota": payload.nota or "",
+                "nueva_fecha": payload.nueva_fecha,
+                "ts": iso(now_utc()),
+                "vendedor_id": user["id"],
+                "actividad_id": act_doc["id"],
+            }
+            break
+    await db.rutas_ventas.update_one({"id": rid}, {"$set": {"paradas": paradas}})
+
+    return {
+        "ok": True,
+        "estatus": payload.estatus,
+        "actividad_id": act_doc["id"],
+        "oportunidad_id": opp["id"],
+        "oportunidad_creada": opp.get("titulo", "").startswith("Prospección visita"),
+        "mensaje": f"{icon} {label} registrada · actividad CRM ligada a {parada.get('empresa_nombre')}",
+    }
 
 
 def _build_ruta_pdf(ruta: dict) -> bytes:

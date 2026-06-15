@@ -47,8 +47,9 @@ export default function AdminRutaVentasPage() {
   const [showHistory, setShowHistory] = useState(false);
 
   const loadHistory = async () => {
-    try { const r = await api.get("/ruta-ventas"); setHistory(r.data); } catch {}
+    try { const r = await api.get("/ruta-ventas"); setHistory(r.data); } catch { /* silent */ }
   };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { if (allowed) loadHistory(); }, [allowed]);
 
   if (!allowed) {
@@ -97,10 +98,20 @@ export default function AdminRutaVentasPage() {
   const guardar = async () => {
     if (!plan) return;
     try {
-      await api.post("/ruta-ventas/guardar", { ...plan, fecha });
+      const { data } = await api.post("/ruta-ventas/guardar", { ...plan, fecha });
+      setPlan({ ...plan, id: data.id });
       await loadHistory();
-      alert("✅ Ruta guardada en histórico");
+      alert("✅ Ruta guardada. Ya puedes marcar visitas y se ligarán al CRM.");
     } catch (e) { setErr(formatApiError(e)); }
+  };
+
+  const refreshPlan = async () => {
+    if (!plan?.id) return;
+    try {
+      const { data } = await api.get("/ruta-ventas");
+      const updated = data.find((r) => r.id === plan.id);
+      if (updated) setPlan({ ...plan, paradas: updated.paradas });
+    } catch { /* silent */ }
   };
 
   const pdf = async () => {
@@ -148,7 +159,13 @@ export default function AdminRutaVentasPage() {
           <div>
             <label className="label-overline">Origen</label>
             <div className="flex gap-2 mt-1">
-              <input data-testid="ruta-origen" className="input-field flex-1" value={origen} onChange={(e) => setOrigen(e.target.value)} placeholder="Ej. Morelia, Michoacán" />
+              <CityAutocomplete
+                value={origen}
+                onChange={setOrigen}
+                placeholder="Ej. Morelia, Michoacán"
+                testId="ruta-origen"
+                className="flex-1"
+              />
               <button onClick={detectarUbicacion} data-testid="ruta-detectar" title="Usar mi ubicación" className="btn-ghost px-3"><Locate size={14} /></button>
             </div>
           </div>
@@ -156,7 +173,14 @@ export default function AdminRutaVentasPage() {
           {modo === "corredor" && (
             <div>
               <label className="label-overline">Destino</label>
-              <input data-testid="ruta-destino" className="input-field mt-1" value={destino} onChange={(e) => setDestino(e.target.value)} placeholder="Ej. Querétaro, Querétaro" />
+              <div className="mt-1">
+                <CityAutocomplete
+                  value={destino}
+                  onChange={setDestino}
+                  placeholder="Ej. Querétaro, Querétaro"
+                  testId="ruta-destino"
+                />
+              </div>
             </div>
           )}
 
@@ -208,14 +232,14 @@ export default function AdminRutaVentasPage() {
             </div>
           )}
 
-          {plan && <PlanResult plan={plan} />}
+          {plan && <PlanResult plan={plan} onUpdate={refreshPlan} />}
         </div>
       </div>
     </div>
   );
 }
 
-function PlanResult({ plan }) {
+function PlanResult({ plan, onUpdate }) {
   const route = plan.route || {};
   const linePoints = route.geometry ? polyline.decode(route.geometry).map(([lat, lng]) => [lat, lng]) : null;
   const allPoints = [];
@@ -245,11 +269,12 @@ function PlanResult({ plan }) {
               </Marker>
             )}
             {plan.paradas?.map((p, i) => (
-              <Marker key={p.empresa_id} position={[p.lat, p.lng]} icon={iconColor("#F37021", String(i + 1))}>
+              <Marker key={p.empresa_id} position={[p.lat, p.lng]} icon={iconColor(p.visita ? "#10B981" : "#F37021", String(i + 1))}>
                 <Popup>
                   <b>{p.empresa_nombre}</b><br />
                   {p.ciudad} · {p.mejor_etapa}<br />
                   Score: {p.score} · {fmtMXN(p.monto_total)}
+                  {p.visita && <><br /><b style={{color:"#10B981"}}>✓ {p.visita.estatus}</b></>}
                 </Popup>
               </Marker>
             ))}
@@ -281,7 +306,7 @@ function PlanResult({ plan }) {
           </div>
         ) : (
           plan.paradas?.map((p, i) => (
-            <ParadaCard key={p.empresa_id} parada={p} index={i + 1} />
+            <ParadaCard key={p.empresa_id} parada={p} index={i + 1} rutaId={plan.id} onUpdate={onUpdate} />
           ))
         )}
       </div>
@@ -298,17 +323,48 @@ function PlanResult({ plan }) {
   );
 }
 
-function ParadaCard({ parada, index }) {
+const VISITA_META = {
+  visitada: { label: "Visitada", color: "emerald", icon: "✅" },
+  no_atendio: { label: "No atendió", color: "amber", icon: "🚪" },
+  reagendada: { label: "Reagendada", color: "sky", icon: "🔁" },
+  cancelada: { label: "Cancelada", color: "rose", icon: "❌" },
+};
+
+function ParadaCard({ parada, index, rutaId, onUpdate }) {
+  const [showActions, setShowActions] = useState(false);
+  const [nota, setNota] = useState("");
+  const [nuevaFecha, setNuevaFecha] = useState("");
+  const [busy, setBusy] = useState(false);
   const etapaColor = {
     propuesta: "amber", negociacion: "emerald", calificada: "sky",
     prospeccion: "zinc", ganada: "emerald", perdida: "rose",
   }[parada.mejor_etapa] || "zinc";
+  const visita = parada.visita;
+
+  const marcar = async (estatus) => {
+    if (!rutaId) {
+      alert("⚠️ Primero guarda la ruta para poder marcar visitas (se ligarán al CRM).");
+      return;
+    }
+    setBusy(true);
+    try {
+      const payload = { estatus, nota };
+      if (estatus === "reagendada" && nuevaFecha) payload.nueva_fecha = nuevaFecha;
+      const { data } = await api.post(`/ruta-ventas/${rutaId}/parada/${parada.empresa_id}/visita`, payload);
+      setShowActions(false);
+      setNota(""); setNuevaFecha("");
+      if (onUpdate) await onUpdate();
+      // Toast simple inline
+      alert(data.mensaje || "Visita registrada");
+    } catch (e) { alert(formatApiError(e)); }
+    finally { setBusy(false); }
+  };
 
   return (
-    <div className="border border-white/10 bg-zinc-950 p-4 hover:border-amber-500/40 transition-colors" data-testid={`parada-${parada.empresa_id}`}>
+    <div className={`border ${visita ? `border-${VISITA_META[visita.estatus]?.color}-500/40 bg-${VISITA_META[visita.estatus]?.color}-500/5` : "border-white/10 bg-zinc-950 hover:border-amber-500/40"} p-4 transition-colors`} data-testid={`parada-${parada.empresa_id}`}>
       <div className="flex items-start gap-4">
-        <div className="w-10 h-10 bg-amber-500 text-black font-black flex items-center justify-center font-mono text-base shrink-0">
-          {index}
+        <div className={`w-10 h-10 ${visita ? "bg-emerald-500" : "bg-amber-500"} text-black font-black flex items-center justify-center font-mono text-base shrink-0`}>
+          {visita ? "✓" : index}
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-3 flex-wrap">
@@ -317,6 +373,11 @@ function ParadaCard({ parada, index }) {
               {parada.mejor_etapa}
             </span>
             <span className="text-xs text-zinc-500 font-mono">Score IA <b className="text-amber-400">{parada.score}</b></span>
+            {visita && (
+              <span className={`px-2 py-0.5 text-[10px] font-mono uppercase border border-${VISITA_META[visita.estatus]?.color}-500/40 bg-${VISITA_META[visita.estatus]?.color}-500/10 text-${VISITA_META[visita.estatus]?.color}-400`} data-testid={`visita-badge-${parada.empresa_id}`}>
+                {VISITA_META[visita.estatus]?.icon} {VISITA_META[visita.estatus]?.label}
+              </span>
+            )}
           </div>
           <div className="text-xs text-zinc-500 font-mono mt-1">
             📍 {parada.ciudad || "Sin ciudad"} · 💰 {fmtMXN(parada.monto_total)} · 🎯 {parada.n_oportunidades} opp · 📊 radar {parada.radar_score}
@@ -329,6 +390,43 @@ function ParadaCard({ parada, index }) {
             </div>
             <p className="text-sm text-zinc-200 mt-1 leading-relaxed">{parada.briefing}</p>
           </div>
+
+          {visita && visita.nota && (
+            <div className="mt-2 text-xs text-zinc-400 italic pl-3 border-l-2 border-emerald-500/40">
+              📝 {visita.nota}{visita.nueva_fecha && <> · Reagendada para <b>{visita.nueva_fecha}</b></>}
+            </div>
+          )}
+
+          {!visita && !showActions && (
+            <button onClick={() => setShowActions(true)} data-testid={`gestionar-${parada.empresa_id}`} className="mt-3 btn-ghost text-xs flex items-center gap-1.5">
+              <Target size={12} /> Marcar visita
+            </button>
+          )}
+
+          {showActions && !visita && (
+            <div className="mt-3 border border-amber-500/30 bg-amber-500/5 p-3 space-y-2" data-testid={`visita-form-${parada.empresa_id}`}>
+              <input
+                data-testid={`visita-nota-${parada.empresa_id}`}
+                className="input-field text-xs" placeholder="Nota de la visita (opcional)"
+                value={nota} onChange={(e) => setNota(e.target.value)}
+              />
+              <input
+                data-testid={`visita-nueva-fecha-${parada.empresa_id}`}
+                type="date" className="input-field text-xs" placeholder="Nueva fecha (sólo si reagenda)"
+                value={nuevaFecha} onChange={(e) => setNuevaFecha(e.target.value)}
+              />
+              <div className="grid grid-cols-2 gap-2">
+                {Object.entries(VISITA_META).map(([k, m]) => (
+                  <button key={k} onClick={() => marcar(k)} disabled={busy}
+                    data-testid={`visita-${k}-${parada.empresa_id}`}
+                    className={`p-2 border text-xs label-overline border-${m.color}-500/40 bg-${m.color}-500/5 text-${m.color}-400 hover:bg-${m.color}-500/15 disabled:opacity-40`}>
+                    {m.icon} {m.label}
+                  </button>
+                ))}
+              </div>
+              <button onClick={() => { setShowActions(false); setNota(""); }} className="text-[10px] text-zinc-500 hover:text-zinc-300">Cancelar</button>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -343,6 +441,106 @@ function Stat({ k, v, icon: Icon, highlight }) {
         <div className="label-overline text-[10px]">{k}</div>
       </div>
       <div className={`text-xl font-black mt-1 font-mono ${highlight ? "text-amber-400" : "text-zinc-100"}`}>{v}</div>
+    </div>
+  );
+}
+
+function CityAutocomplete({ value, onChange, placeholder, testId, className = "" }) {
+  const [suggestions, setSuggestions] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [hi, setHi] = useState(-1);
+  const debounceRef = useRef(null);
+  const wrapRef = useRef(null);
+  const justPickedRef = useRef(false);
+
+  // Cierra al click fuera
+  useEffect(() => {
+    const onDoc = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
+
+  const fetchSuggestions = (q) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (!q || q.trim().length < 2) {
+      setSuggestions([]); setOpen(false); setLoading(false);
+      return;
+    }
+    setLoading(true);
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const { data } = await api.get(`/ruta-ventas/geocode/suggest?q=${encodeURIComponent(q)}`);
+        setSuggestions(data.suggestions || []);
+        setOpen((data.suggestions || []).length > 0);
+        setHi(-1);
+      } catch { /* silent */ }
+      finally { setLoading(false); }
+    }, 250);
+  };
+
+  const handleChange = (e) => {
+    const v = e.target.value;
+    onChange(v);
+    if (justPickedRef.current) { justPickedRef.current = false; return; }
+    fetchSuggestions(v);
+  };
+
+  const pick = (s) => {
+    justPickedRef.current = true;
+    onChange(s.display_name || s.label);
+    setOpen(false);
+    setSuggestions([]);
+    setHi(-1);
+  };
+
+  const onKey = (e) => {
+    if (!open || suggestions.length === 0) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, suggestions.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setHi((h) => Math.max(h - 1, 0)); }
+    else if (e.key === "Enter") {
+      if (hi >= 0 && hi < suggestions.length) { e.preventDefault(); pick(suggestions[hi]); }
+    } else if (e.key === "Escape") { setOpen(false); }
+  };
+
+  return (
+    <div ref={wrapRef} className={`relative ${className}`}>
+      <input
+        data-testid={testId}
+        className="input-field w-full"
+        value={value}
+        onChange={handleChange}
+        onFocus={() => { if (suggestions.length > 0) setOpen(true); }}
+        onKeyDown={onKey}
+        placeholder={placeholder}
+        autoComplete="off"
+      />
+      {loading && (
+        <div className="absolute right-2 top-1/2 -translate-y-1/2 text-amber-400">
+          <Loader2 size={14} className="animate-spin" />
+        </div>
+      )}
+      {open && suggestions.length > 0 && (
+        <ul
+          data-testid={`${testId}-dropdown`}
+          className="absolute z-50 left-0 right-0 mt-1 max-h-64 overflow-y-auto border border-amber-500/40 bg-zinc-950 shadow-lg shadow-black/60"
+        >
+          {suggestions.map((s, i) => (
+            <li
+              key={`${s.label}-${i}`}
+              data-testid={`${testId}-suggestion-${i}`}
+              onMouseDown={(e) => { e.preventDefault(); pick(s); }}
+              onMouseEnter={() => setHi(i)}
+              className={`px-3 py-2 text-xs cursor-pointer border-b border-white/5 last:border-0 flex items-start gap-2 ${i === hi ? "bg-amber-500/15 text-amber-200" : "text-zinc-300 hover:bg-white/5"}`}
+            >
+              <MapPin size={12} className="mt-0.5 text-amber-400 shrink-0" />
+              <span className="truncate">{s.label}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
