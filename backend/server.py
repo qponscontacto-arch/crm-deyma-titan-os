@@ -2914,6 +2914,41 @@ NOMINATIM_BASE = "https://nominatim.openstreetmap.org"
 # Cache simple en memoria para geocode (clave: query lowercased)
 _GEOCODE_CACHE: dict = {}
 
+# Pre-cache de ciudades clave de México (mitiga rate-limit de Nominatim)
+_GEOCODE_SEED = [
+    ("morelia", 19.6546, -101.2624, "Morelia, Michoacán, México"),
+    ("morelia, michoacán", 19.6546, -101.2624, "Morelia, Michoacán, México"),
+    ("morelia, mx", 19.6546, -101.2624, "Morelia, Michoacán, México"),
+    ("querétaro", 20.5888, -100.3899, "Querétaro, Querétaro, México"),
+    ("queretaro", 20.5888, -100.3899, "Querétaro, Querétaro, México"),
+    ("querétaro, querétaro", 20.5888, -100.3899, "Querétaro, Querétaro, México"),
+    ("salamanca", 20.5742, -101.196, "Salamanca, Guanajuato, México"),
+    ("celaya", 20.5238, -100.815, "Celaya, Guanajuato, México"),
+    ("león", 21.1250, -101.6860, "León, Guanajuato, México"),
+    ("leon", 21.1250, -101.6860, "León, Guanajuato, México"),
+    ("guanajuato", 21.0190, -101.2574, "Guanajuato, Guanajuato, México"),
+    ("irapuato", 20.6767, -101.3536, "Irapuato, Guanajuato, México"),
+    ("aguascalientes", 21.8853, -102.2916, "Aguascalientes, Aguascalientes, México"),
+    ("san luis potosí", 22.1565, -100.9855, "San Luis Potosí, SLP, México"),
+    ("san luis potosi", 22.1565, -100.9855, "San Luis Potosí, SLP, México"),
+    ("cdmx", 19.4326, -99.1332, "Ciudad de México, CDMX"),
+    ("ciudad de méxico", 19.4326, -99.1332, "Ciudad de México, CDMX"),
+    ("ciudad de mexico", 19.4326, -99.1332, "Ciudad de México, CDMX"),
+    ("guadalajara", 20.6597, -103.3496, "Guadalajara, Jalisco, México"),
+    ("monterrey", 25.6866, -100.3161, "Monterrey, Nuevo León, México"),
+    ("puebla", 19.0414, -98.2063, "Puebla, Puebla, México"),
+    ("toluca", 19.2826, -99.6557, "Toluca, Estado de México"),
+    ("zacatecas", 22.7709, -102.5832, "Zacatecas, Zacatecas, México"),
+    ("uruapan", 19.4119, -102.0517, "Uruapan, Michoacán, México"),
+    ("zamora", 19.9836, -102.2832, "Zamora, Michoacán, México"),
+    ("la piedad", 20.3447, -102.0292, "La Piedad, Michoacán, México"),
+    ("pachuca", 20.1011, -98.7591, "Pachuca, Hidalgo, México"),
+    ("tlaxcala", 19.3139, -98.2404, "Tlaxcala, Tlaxcala, México"),
+    ("saltillo", 25.4232, -101.0053, "Saltillo, Coahuila, México"),
+]
+for k, lat, lng, name in _GEOCODE_SEED:
+    _GEOCODE_CACHE[k] = {"lat": lat, "lng": lng, "display_name": name}
+
 
 async def _geocode(query: str) -> Optional[dict]:
     """Geocodifica una dirección/ciudad usando Nominatim (OSM). Devuelve {lat, lng, display_name}."""
@@ -3022,8 +3057,8 @@ async def _candidatos_en_corredor(origen: dict, destino: Optional[dict], max_des
         if dist_corr > threshold:
             continue
         emp_opps = opps_by_emp.get(emp["id"], [])
-        monto_total = sum((o.get("monto_estimado") or 0) for o in emp_opps if o.get("estado") not in ("ganada", "perdida"))
-        mejor_etapa = max((SCORE_ETAPA.get(o.get("estado", ""), 0) for o in emp_opps), default=0)
+        monto_total = sum((o.get("monto_estimado") or 0) for o in emp_opps if o.get("stage") not in ("ganada", "perdida"))
+        mejor_etapa = max((SCORE_ETAPA.get(o.get("stage", ""), 0) for o in emp_opps), default=0)
         # última actividad
         ultima_act_dias = None
         if emp_opps:
@@ -3055,8 +3090,8 @@ async def _candidatos_en_corredor(origen: dict, destino: Optional[dict], max_des
             "estado_geo": emp.get("estado", ""),
             "rfc": emp.get("rfc", ""),
             "monto_total": monto_total,
-            "n_oportunidades": len([o for o in emp_opps if o.get("estado") not in ("ganada", "perdida")]),
-            "mejor_etapa": next((o["estado"] for o in emp_opps if SCORE_ETAPA.get(o.get("estado"), 0) == mejor_etapa), "prospeccion"),
+            "n_oportunidades": len([o for o in emp_opps if o.get("stage") not in ("ganada", "perdida")]),
+            "mejor_etapa": next((o.get("stage") for o in emp_opps if SCORE_ETAPA.get(o.get("stage"), 0) == mejor_etapa and o.get("stage")), "prospeccion"),
             "ultima_actividad_dias": ultima_act_dias,
             "radar_score": radar_max,
             "score": score,

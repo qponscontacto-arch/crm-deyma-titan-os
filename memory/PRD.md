@@ -321,6 +321,27 @@ Wireframes implementados en código (no Figma) en:
 - ✅ **Frontend `/scraper`**: 3 action cards (Ejecutar / Calificar / Enviar) + 4 stats cards (Total radar / Detectados IA / Twilio status / Errores) + panel del último resumen matutino con top 5 + log de ejecuciones.
 - ✅ Testing iter 3: 14/14 backend V3 (100%) + 100% frontend crítico. Bug NaN del mapa **resuelto**.
 
+## 18. V4.8 Ruta de Ventas IA + Gastos de Viajero (15-Feb-2026)
+### Implementado y probado (iteration_8.json · 34/36 backend + 100% frontend)
+- ✅ **Ruta de Ventas Inteligente** (`/admin/ruta-ventas`, roles comercial+director+socio): formulario con origen/destino/desvío/paradas + auto-geolocalización. El sistema geocodifica (Nominatim/OSM con cache pre-poblado de 28 ciudades clave de México), calcula ruta vehicular (OSRM público), busca empresas/oportunidades en el corredor con score combinado (radar+monto+etapa CRM+actividad), pasa la lista al agente IA GPT-5.2 (Emergent LLM) que devuelve briefing accionable por parada.
+- ✅ Resultado en UI: mapa Leaflet con polyline naranja decodificada, marcadores numerados por parada, 4 stats (distancia/duración/paradas/candidatos), resumen IA + recomendación final + cards individuales por parada con score, monto MXN, etapa, días desde última actividad y desvío del corredor.
+- ✅ **PDF descargable** con membrete DEYMA + mapa estático (OSM tiles vía staticmap) + tabla de paradas + briefing IA por parada + recomendación.
+- ✅ **Histórico**: guardar/listar/eliminar rutas; comercial ve sólo las suyas, director/socio ven todas.
+- ✅ **Gastos de Viajero** (`/admin/gastos`, roles comercial+director+socio): CRUD con upload de foto/PDF a GridFS, 6 tipos (gasolina/casetas/comida/hospedaje/estacionamiento/otros), monto MXN, fecha, lugar, descripción opcional. Filtros por tipo/fecha. Stats con total filtrado y desglose por tipo. Comercial ve sólo sus gastos; director/socio ven todos.
+
+### Endpoints nuevos
+- `POST /api/ruta-ventas/generar` · `POST /api/ruta-ventas/guardar` · `GET /api/ruta-ventas` · `DELETE /api/ruta-ventas/{rid}` · `POST /api/ruta-ventas/pdf`
+- `POST/GET /api/gastos-viajero` · `GET /api/gastos-viajero/{gid}/file` · `DELETE /api/gastos-viajero/{gid}`
+
+### Dependencias nuevas
+- Backend: `polyline 2.0.4`, `staticmap 0.5.7`
+- Frontend: `leaflet`, `react-leaflet`, `@mapbox/polyline`
+
+### Notas / Mitigaciones
+- Nominatim público puede rate-limitar; mitigado con cache pre-poblado de las 28 ciudades clave de México (Morelia, Querétaro, Salamanca, Celaya, León, etc.).
+- OSRM público (router.project-osrm.org) podría caer; el endpoint maneja graceful y devuelve sin polyline (UI muestra paradas igual).
+
+
 ## 17. V4.7 PDF Cotización · Membrete dual (DEYMA / FRECCIAMD) (15-Feb-2026)
 ### Implementado y probado (iteration_7.json · 13/13 backend + 100% frontend)
 - ✅ El PDF de cotización ahora replica el diseño del template oficial subido por el usuario: colores corporativos NAVY `#0F1F4D` + ORANGE `#F37021`, datos del cliente en cápsulas azules, tabla NAVY+ORANGE con columnas CÓDIGO/CONCEPTO/UNIDAD/CANTIDAD/P.UNITARIO/IMPORTE, TOTAL prominente en navy y las **10 observaciones generales exactas** del template oficial.
