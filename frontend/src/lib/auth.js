@@ -4,9 +4,12 @@ import React, { createContext, useContext, useEffect, useState } from "react";
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
 
+const TOKEN_KEY = "deyma_token";
+const KIND_KEY = "deyma_kind"; // "staff" | "cliente"
+
 export const api = axios.create({ baseURL: API });
 api.interceptors.request.use((cfg) => {
-  const t = localStorage.getItem("deyma_token");
+  const t = localStorage.getItem(TOKEN_KEY);
   if (t) cfg.headers.Authorization = `Bearer ${t}`;
   return cfg;
 });
@@ -15,31 +18,47 @@ const AuthCtx = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
+  const [cliente, setCliente] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const t = localStorage.getItem("deyma_token");
+    const t = localStorage.getItem(TOKEN_KEY);
+    const kind = localStorage.getItem(KIND_KEY);
     if (!t) { setLoading(false); return; }
-    api.get("/auth/me")
-      .then((r) => setUser(r.data))
-      .catch(() => { localStorage.removeItem("deyma_token"); setUser(null); })
+    const url = kind === "cliente" ? "/clientes/me" : "/auth/me";
+    api.get(url)
+      .then((r) => { if (kind === "cliente") setCliente(r.data); else setUser(r.data); })
+      .catch(() => { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(KIND_KEY); setUser(null); setCliente(null); })
       .finally(() => setLoading(false));
   }, []);
 
   const login = async (email, password) => {
     const { data } = await api.post("/auth/login", { email, password });
-    localStorage.setItem("deyma_token", data.access_token);
+    localStorage.setItem(TOKEN_KEY, data.access_token);
+    localStorage.setItem(KIND_KEY, "staff");
     setUser(data.user);
+    setCliente(null);
     return data.user;
   };
 
-  const logout = () => {
-    localStorage.removeItem("deyma_token");
+  const loginCliente = async (dfnum, password) => {
+    const { data } = await api.post("/clientes/login", { dfnum, password });
+    localStorage.setItem(TOKEN_KEY, data.access_token);
+    localStorage.setItem(KIND_KEY, "cliente");
+    setCliente(data.cliente);
     setUser(null);
+    return data.cliente;
+  };
+
+  const logout = () => {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(KIND_KEY);
+    setUser(null);
+    setCliente(null);
   };
 
   return (
-    <AuthCtx.Provider value={{ user, loading, login, logout }}>
+    <AuthCtx.Provider value={{ user, cliente, loading, login, loginCliente, logout }}>
       {children}
     </AuthCtx.Provider>
   );

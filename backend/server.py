@@ -116,7 +116,7 @@ def require_roles(*roles: str):
 # ----------------------------------------------------------------------------
 # Models
 # ----------------------------------------------------------------------------
-Role = Literal["director", "comercial", "operaciones"]
+Role = Literal["director", "comercial", "operaciones", "socio"]
 Sector = Literal["nearshoring", "parques_industriales", "cedis_logistica", "manufactura", "data_centers", "expansion_planta", "otro"]
 Stage = Literal["prospeccion", "calificada", "propuesta", "negociacion", "ganada", "perdida"]
 Hotness = Literal["hot", "warm", "cold"]
@@ -835,13 +835,19 @@ async def seed_data():
     extras = [
         {"email": "comercial@deyma.mx", "name": "Ana López (Comercial)", "role": "comercial", "pw": "Comercial2026!"},
         {"email": "operaciones@deyma.mx", "name": "Carlos Ruiz (Operaciones)", "role": "operaciones", "pw": "Operaciones2026!"},
+        {"email": "socio@deyma.mx", "name": "Ing. Eduardo Domínguez (Socio)", "role": "socio", "pw": "Socio2026!"},
     ]
     for u in extras:
-        if not await db.users.find_one({"email": u["email"]}):
+        existing_u = await db.users.find_one({"email": u["email"]})
+        if not existing_u:
             await db.users.insert_one({
                 "id": new_id(), "email": u["email"], "name": u["name"], "role": u["role"],
                 "password_hash": hash_password(u["pw"]), "created_at": iso(now_utc()),
             })
+        elif not verify_password(u["pw"], existing_u.get("password_hash", "")):
+            await db.users.update_one({"email": u["email"]}, {"$set": {
+                "password_hash": hash_password(u["pw"]), "role": u["role"], "name": u["name"],
+            }})
 
     # Empresas
     if await db.empresas.count_documents({}) == 0:
@@ -1969,6 +1975,23 @@ async def cliente_me(cli: dict = Depends(get_current_cliente)):
     return cli
 
 
+@api.get("/clientes/me/cotizaciones")
+async def cliente_mis_cotizaciones(cli: dict = Depends(get_current_cliente)):
+    """Cotizaciones ligadas al cliente (vía RFC de la empresa)."""
+    rfc = (cli.get("rfc") or "").upper()
+    if not rfc:
+        return []
+    empresas = await db.empresas.find({"rfc": rfc}, {"_id": 0, "id": 1}).to_list(50)
+    empresa_ids = [e["id"] for e in empresas]
+    if not empresa_ids:
+        return []
+    cots = await db.cotizaciones.find(
+        {"empresa_id": {"$in": empresa_ids}},
+        {"_id": 0, "outbound_emails": 0, "inbound_replies": 0, "historia": 0},
+    ).sort("created_at", -1).to_list(200)
+    return cots
+
+
 @api.get("/clientes/status/{folio_or_dfnum}")
 async def cliente_status(folio_or_dfnum: str):
     """Consulta pública (con folio o DFNUM) del estado del trámite."""
@@ -2086,7 +2109,7 @@ async def get_cliente_file(cid: str, doc_key: str,
 
 
 # ----- Órdenes de Compra (cliente sube PDF) -----
-@api.post("/clientes/ordenes-compra")
+@api.post("/clientes-oc")
 async def upload_oc(
     referencia: str = Form(...),
     monto: float = Form(0),
@@ -2119,13 +2142,13 @@ async def upload_oc(
     return oc
 
 
-@api.get("/clientes/ordenes-compra")
+@api.get("/clientes-oc")
 async def list_oc(cli: dict = Depends(get_current_cliente)):
     full = await db.clientes_alta.find_one({"id": cli["id"]}, {"_id": 0, "ordenes_compra": 1})
     return full.get("ordenes_compra", []) if full else []
 
 
-@api.get("/clientes/ordenes-compra/{oc_id}/file")
+@api.get("/clientes-oc/{oc_id}/file")
 async def download_oc(oc_id: str, cli: dict = Depends(get_current_cliente)):
     full = await db.clientes_alta.find_one({"id": cli["id"]}, {"_id": 0, "ordenes_compra": 1})
     oc = next((o for o in full.get("ordenes_compra", []) if o["id"] == oc_id), None)

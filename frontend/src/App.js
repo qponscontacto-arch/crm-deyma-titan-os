@@ -13,13 +13,32 @@ import AlertasPage from "@/pages/AlertasPage";
 import MisTareasPage from "@/pages/MisTareasPage";
 import ScraperPage from "@/pages/ScraperPage";
 import ObrasPage from "@/pages/ObrasPage";
+import AltaClientePage from "@/pages/AltaClientePage";
+import ConsultaTramitePage from "@/pages/ConsultaTramitePage";
+import ClientePortalPage from "@/pages/ClientePortalPage";
+import AdminClientesPage from "@/pages/AdminClientesPage";
 
-function Protected({ children }) {
-  const { user, loading } = useAuth();
-  if (loading) return <div className="min-h-screen flex items-center justify-center bg-black text-amber-400 font-mono text-xs label-overline animate-pulse">Verificando sesión…</div>;
+function ProtectedStaff({ children }) {
+  const { user, cliente, loading } = useAuth();
+  if (loading) return <Loader />;
+  if (cliente && !user) return <Navigate to="/cliente" replace />;
   if (!user) return <Navigate to="/login" replace />;
   return children;
 }
+
+function ProtectedCliente({ children }) {
+  const { cliente, user, loading } = useAuth();
+  if (loading) return <Loader />;
+  if (user && !cliente) return <Navigate to="/" replace />;
+  if (!cliente) return <Navigate to="/login" replace />;
+  return children;
+}
+
+const Loader = () => (
+  <div className="min-h-screen flex items-center justify-center bg-black text-amber-400 font-mono text-xs label-overline animate-pulse">
+    Verificando sesión…
+  </div>
+);
 
 function App() {
   return (
@@ -28,7 +47,10 @@ function App() {
         <AuthProvider>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
-            <Route path="/" element={<Protected><AppLayout /></Protected>}>
+            <Route path="/alta-cliente" element={<AltaClientePage />} />
+            <Route path="/consulta-tramite" element={<ConsultaTramitePage />} />
+            <Route path="/cliente" element={<ProtectedCliente><ClientePortalPage /></ProtectedCliente>} />
+            <Route path="/" element={<ProtectedStaff><AppLayout /></ProtectedStaff>}>
               <Route index element={<DashboardPage />} />
               <Route path="radar" element={<RadarPage />} />
               <Route path="crm" element={<CRMPage />} />
@@ -38,6 +60,7 @@ function App() {
               <Route path="tareas" element={<MisTareasPage />} />
               <Route path="alertas" element={<AlertasPage />} />
               <Route path="scraper" element={<ScraperPage />} />
+              <Route path="admin/clientes" element={<AdminClientesPage />} />
             </Route>
           </Routes>
         </AuthProvider>

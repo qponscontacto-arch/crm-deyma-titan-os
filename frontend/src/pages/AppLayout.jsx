@@ -1,7 +1,7 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
-import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot } from "lucide-react";
+import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus } from "lucide-react";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testId: "nav-dashboard" },
@@ -13,6 +13,7 @@ const NAV = [
   { to: "/obras", label: "Obras", icon: Hammer, testId: "nav-obras" },
   { to: "/tareas", label: "Mis Tareas", icon: ListTodo, testId: "nav-tareas" },
   { to: "/alertas", label: "Alertas HOT", icon: Bell, testId: "nav-alertas" },
+  { to: "/admin/clientes", label: "Alta Clientes", icon: UserPlus, testId: "nav-admin-clientes", roles: ["director", "socio", "comercial"] },
 ];
 
 export default function AppLayout() {
@@ -20,7 +21,9 @@ export default function AppLayout() {
   const nav = useNavigate();
   const onLogout = () => { logout(); nav("/login"); };
 
-  const roleLabel = { director: "Director General", comercial: "Comercial", operaciones: "Operaciones" }[user?.role] || user?.role;
+  const roleLabel = { director: "Director General", comercial: "Comercial", operaciones: "Operaciones", socio: "Socio" }[user?.role] || user?.role;
+
+  const visibleNav = NAV.filter((n) => !n.roles || n.roles.includes(user?.role));
 
   return (
     <div className="min-h-screen flex bg-black">
@@ -36,7 +39,7 @@ export default function AppLayout() {
         </div>
 
         <nav className="flex-1 p-2 space-y-1">
-          {NAV.map((n) => (
+          {visibleNav.map((n) => (
             <NavLink
               key={n.to} to={n.to} end={n.to === "/"} data-testid={n.testId}
               className={({ isActive }) =>

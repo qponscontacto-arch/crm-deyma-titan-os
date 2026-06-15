@@ -1,0 +1,41 @@
+{
+  "summary": "V4 Portal de Alta de Clientes tested end-to-end. Backend: 35/35 PASS in /app/backend/tests/test_v4_clientes.py covering (a) seed socio/director, (b) POST /api/clientes/alta multipart (5 PDFs + ~30 campos) → folio ALT-2026-NNNN + estado=pendiente + dfnum=null, (c) 400 en RFC duplicado, email duplicado y archivo > 10 MB, (d) GET /api/clientes/status/{folio|DFNUM} público con 404 para no-existentes, (e) aprobación dual: comercial=403, director→aprobado_director (sin DFNUM), socio→aprobado_completo + DFNUM-XXXXXX, re-aprobar mismo rol=400, estado final=400, (f) rechazo final → estado='rechazado' bloquea aprobación posterior, (g) login cliente: pendiente=401, password mala=401, aprobado=200 con token+cliente (sin password_hash), (h) GET /api/clientes/me + /me/cotizaciones (lista vacía sin RFC match), (i) POST /api/clientes-oc PDF upload + GET list + GET binario; rechaza non-PDF con 400, (j) GET /api/clientes/{cid}/pdf-alta = PDF >3KB application/pdf, (k) GET /api/clientes/{cid}/pdf-bienvenida = 400 si estado != aprobado_completo, 200 cuando aprobado, (l) GET /api/clientes/{cid}/file/{doc_key} sirve PDF a director, 401/403 sin auth, (m) GET /api/clientes 403 para operaciones, (n) regresión: /api/dashboard/kpis, /api/oportunidades, /api/cotizaciones, /api/radar, /api/empresas, /api/scraper/status todos 200. Frontend Playwright: tabs staff/cliente con data-testid OK; staff login director → /, sidebar nav-admin-clientes visible para director, NO para operaciones; /admin/clientes muestra 5 filas + filtros + detalle modal abre; /consulta-tramite con DFNUM-987374 muestra estado 'aprobado'; /alta-cliente con stepper (razon-social/rfc/email/step-next presentes); cliente login con DFNUM-987374/Cliente2026! redirige a /cliente; 3 tabs (inicio, ocs, cots) + download-bienvenida + oc-referencia/monto/notas/file/submit + cots-empty (cliente sin cotizaciones) + cliente-logout funcional.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/clientes/alta", "issue": "Las solicitudes TEST_ se acumulan en clientes_alta + GridFS (5 PDFs por solicitud). Tras múltiples corridas crece el storage. Considerar teardown o filtro `razon_social.startswith('TEST')` en limpieza nocturna."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v4_clientes.py",
+    "/app/test_reports/pytest/pytest_v4_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py ahora son 2651 líneas (era 2069 en V3.5). El bloque V4 'Portal de Alta de Clientes' añade ~570 líneas (1803-2370). URGENTE refactor antes de V5 — extraer a /app/backend/routers/clientes.py + /app/backend/services/pdf_alta.py (builder PDF de 170 líneas) + /app/backend/services/clientes_auth.py (get_current_cliente + create_client_token).",
+    "Orden de rutas seguro confirmado: /clientes/status/{x} (l.1995), /clientes/me (1973), /clientes/me/cotizaciones (1978) declaradas ANTES de /clientes/{cid} (l.2020). No hay shadowing. Buen catch del autor.",
+    "POST /api/clientes/alta acepta 'image/*' para INE pero el comentario sólo lo menciona, no se valida que sea exclusivo del campo `ine_representante` — un atacante podría subir image/png al campo `csf` y pasaría también. Endurecer validación por documento.",
+    "El password_hash del cliente nunca expira y no hay endpoint `/api/clientes/me/password` para cambio de contraseña. Riesgo de seguridad si el alta se hizo con password débil; agregar flujo de cambio obligatorio en primer login.",
+    "El PDF de bienvenida se construye en thread síncrono (asyncio.to_thread) — bien — pero `_build_alta_pdf` importa reportlab dentro de la función en cada llamada. Mover imports al top-level del módulo para evitar overhead.",
+    "GET /api/clientes/{cid}/pdf-alta y /pdf-bienvenida son PÚBLICOS (sin auth). Cualquiera con el `id` UUID del cliente puede descargar PDF con datos sensibles (RFC, domicilio, contactos, representante legal). Aunque el id sea UUIDv4, considerar requerir el folio o un token de un solo uso. Mínimo: documentar el riesgo.",
+    "POST /api/clientes-oc no valida monto >= 0 ni longitud máxima de `notas`. Permite monto negativo y notas de N MB.",
+    "La función _gen_dfnum usa random.randint(100000,999999) sin chequear colisiones. En 1M de clientes la probabilidad de colisión es ~50% (paradoja del cumpleaños). Cambiar a UUID corto o validar unicidad antes de insertar.",
+    "El campo `aprobaciones` ahora mezcla aprobaciones positivas Y la entrada de rechazo (mismo array). Sería más limpio separar `aprobaciones` y `rechazos` para auditoría.",
+    "AdminClientesPage.jsx (298 líneas) y AltaClientePage.jsx (383 líneas) y ClientePortalPage.jsx (282 líneas) están en rango sano; AltaClientePage podría extraer el FileUploadField y cada paso a sub-componentes."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v4_clientes.py (NUEVO — 35 tests, prefijo TEST_)"
+  ],
+  "success_rate": {"backend": "100% (35/35)", "frontend": "100% (todas las verificaciones de UI/integración pasaron)"},
+  "test_credentials": "director@deyma.mx/Deyma2026!, socio@deyma.mx/Socio2026!, comercial@deyma.mx/Comercial2026!, operaciones@deyma.mx/Operaciones2026!. Cliente test creado durante la corrida: DFNUM-987374 / Cliente2026! (folio ALT-2026-0005, RFC FE21785155981, aprobado_completo).",
+  "seed_data_creation": "Cada corrida pytest crea ~5 solicitudes TEST_ en clientes_alta (1 aprobada, 1 rechazada, 1 pendiente para bienvenida-400, 1 pendiente para login-fail, 1 para email-dup +1 para big-file = ~6 GridFS uploads × 5 archivos cada uno). El test de UI dejó DFNUM-987374 aprobado en BD. Recomendar limpieza periódica de TEST_ alta.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "V4 Portal de Alta está 100% verde. Para V5 priorizar: (1) refactor server.py → routers/* (2651 líneas), (2) seguridad de PDFs públicos por id, (3) endpoint cambio de password cliente, (4) unicidad DFNUM. test_v4_clientes.py es regresión rápida (~9s). Para correr toda la regresión: `pytest /app/backend/tests/ -v`. SendGrid y Twilio siguen MOCKED. EMERGENT_LLM_KEY presente. La accumulation de TEST_ alta no es bloqueante pero crece — opcional agregar fixture session-scope con teardown de delete_many({'rfc': {'$regex': '^TST|^REJ|^PND|^BIG|^OTR|^BVN|^FE2'}}).",
+  "rca of the issue": "N/A — no se encontraron bugs bloqueantes ni regresiones. Todos los endpoints V4 y los 5 endpoints de regresión funcionan correctamente. La descarga automática del PDF de bienvenida al primer login no se verificó en navegador (axios + blob + click programático) pero el botón manual 'download-bienvenida' está presente y el endpoint backend retorna PDF válido — coherente con la nota del agente principal."
+}
