@@ -17,6 +17,7 @@ import AltaClientePage from "@/pages/AltaClientePage";
 import ConsultaTramitePage from "@/pages/ConsultaTramitePage";
 import ClientePortalPage from "@/pages/ClientePortalPage";
 import AdminClientesPage from "@/pages/AdminClientesPage";
+import AdminRHPage from "@/pages/AdminRHPage";
 
 function ProtectedStaff({ children }) {
   const { user, cliente, loading } = useAuth();
@@ -61,6 +62,7 @@ function App() {
               <Route path="alertas" element={<AlertasPage />} />
               <Route path="scraper" element={<ScraperPage />} />
               <Route path="admin/clientes" element={<AdminClientesPage />} />
+              <Route path="admin/rh" element={<AdminRHPage />} />
             </Route>
           </Routes>
         </AuthProvider>

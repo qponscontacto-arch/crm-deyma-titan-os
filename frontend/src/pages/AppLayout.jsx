@@ -1,7 +1,7 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
-import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus } from "lucide-react";
+import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus, Users2 } from "lucide-react";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testId: "nav-dashboard" },
@@ -14,6 +14,7 @@ const NAV = [
   { to: "/tareas", label: "Mis Tareas", icon: ListTodo, testId: "nav-tareas" },
   { to: "/alertas", label: "Alertas HOT", icon: Bell, testId: "nav-alertas" },
   { to: "/admin/clientes", label: "Alta Clientes", icon: UserPlus, testId: "nav-admin-clientes", roles: ["director", "socio", "comercial"] },
+  { to: "/admin/rh", label: "RH · Personal", icon: Users2, testId: "nav-admin-rh", roles: ["director", "socio"] },
 ];
 
 export default function AppLayout() {

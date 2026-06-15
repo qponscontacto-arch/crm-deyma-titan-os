@@ -2367,6 +2367,512 @@ async def pdf_bienvenida(cid: str):
     )
 
 
+# ============================================================================
+# V4.5 · RH · Personal Contratado (acceso director + socio)
+# ============================================================================
+DEPARTAMENTOS_RH = ["Obra", "Administración", "Comercial", "Operaciones", "Diseño", "RH"]
+TIPOS_DOC_RH = {
+    "general": "Documentación general (INE/CURP/NSS/comprobante)",
+    "contrato": "Contrato de contratación",
+    "renuncia": "Carta de renuncia",
+    "amonestacion": "Carta de amonestación",
+    "cert_medico": "Certificado médico",
+    "dc3": "Constancia DC-3 STPS",
+}
+
+
+def _vacaciones_por_antiguedad(anios: int) -> int:
+    """Tabla LFT 2023 (reforma vacaciones dignas)."""
+    if anios < 1:
+        return 0
+    base = [12, 14, 16, 18, 20]
+    if anios <= 5:
+        return base[anios - 1]
+    if anios <= 10:
+        return 22
+    if anios <= 15:
+        return 24
+    if anios <= 20:
+        return 26
+    if anios <= 25:
+        return 28
+    if anios <= 30:
+        return 30
+    return 32
+
+
+def _calcular_prestaciones(empleado: dict) -> dict:
+    """Calcula prestaciones según LFT vigente."""
+    from datetime import datetime as _dt
+    today = now_utc().date()
+    fi_str = empleado.get("fecha_ingreso")
+    if not fi_str:
+        return {"antiguedad_anios": 0, "antiguedad_meses": 0, "vacaciones_anuales": 0,
+                "proximo_aniversario": None, "dias_para_aniversario": None,
+                "aguinaldo_dias": 15, "prima_vacacional_pct": 25,
+                "vacaciones_gozadas": 0, "vacaciones_pendientes": 0}
+    fi = _dt.fromisoformat(fi_str.replace("Z", "+00:00")).date() if "T" in fi_str else _dt.strptime(fi_str[:10], "%Y-%m-%d").date()
+    anios = today.year - fi.year - ((today.month, today.day) < (fi.month, fi.day))
+    meses = (today.year - fi.year) * 12 + (today.month - fi.month)
+    if today.day < fi.day:
+        meses -= 1
+    # próximo aniversario
+    try:
+        prox = fi.replace(year=today.year)
+        if prox <= today:
+            prox = fi.replace(year=today.year + 1)
+    except ValueError:  # 29-feb
+        prox = fi.replace(year=today.year + 1, day=28)
+    dias_aniv = (prox - today).days
+    vac_anuales = _vacaciones_por_antiguedad(max(anios, 1) if anios >= 1 else 1)
+    if anios < 1:
+        # proporcional al primer año (12 días * meses/12)
+        vac_anuales = round(12 * (meses / 12))
+    return {
+        "antiguedad_anios": anios,
+        "antiguedad_meses": meses,
+        "vacaciones_anuales_periodo_actual": vac_anuales,
+        "proximo_aniversario": prox.isoformat(),
+        "dias_para_aniversario": dias_aniv,
+        "vacaciones_proximo_periodo": _vacaciones_por_antiguedad(anios + 1),
+        "aguinaldo_dias": 15,
+        "prima_vacacional_pct": 25,
+    }
+
+
+class EmpleadoIn(BaseModel):
+    nombre: str
+    rfc: str = ""
+    curp: str = ""
+    nss: str = ""
+    puesto: str
+    departamento: str
+    fecha_ingreso: str  # YYYY-MM-DD
+    salario_diario: float = 0.0
+    salario_mensual: float = 0.0
+    sueldo_integrado: float = 0.0
+    tel: str = ""
+    correo: str = ""
+    domicilio: str = ""
+    contacto_emergencia_nombre: str = ""
+    contacto_emergencia_tel: str = ""
+    notas: str = ""
+
+
+class EmpleadoUpdate(BaseModel):
+    nombre: Optional[str] = None
+    rfc: Optional[str] = None
+    curp: Optional[str] = None
+    nss: Optional[str] = None
+    puesto: Optional[str] = None
+    departamento: Optional[str] = None
+    fecha_ingreso: Optional[str] = None
+    fecha_baja: Optional[str] = None
+    salario_diario: Optional[float] = None
+    salario_mensual: Optional[float] = None
+    sueldo_integrado: Optional[float] = None
+    tel: Optional[str] = None
+    correo: Optional[str] = None
+    domicilio: Optional[str] = None
+    contacto_emergencia_nombre: Optional[str] = None
+    contacto_emergencia_tel: Optional[str] = None
+    status: Optional[str] = None  # activo|baja
+    motivo_baja: Optional[str] = None
+    notas: Optional[str] = None
+
+
+class VacacionesIn(BaseModel):
+    fecha_inicio: str
+    fecha_fin: str
+    dias: int
+    estatus: str = "programadas"  # programadas|gozadas|canceladas
+    nota: str = ""
+
+
+require_rh = require_roles("director", "socio")
+
+
+@api.post("/rh/empleados")
+async def rh_create_empleado(payload: EmpleadoIn, user: dict = Depends(require_rh)):
+    emp = payload.dict()
+    emp["id"] = new_id()
+    emp["status"] = "activo"
+    emp["fecha_baja"] = None
+    emp["motivo_baja"] = ""
+    emp["created_at"] = iso(now_utc())
+    emp["created_by"] = user["id"]
+    emp["documentos_count"] = 0
+    await db.empleados.insert_one(emp)
+    emp.pop("_id", None)
+    return emp
+
+
+@api.get("/rh/empleados")
+async def rh_list_empleados(
+    status: Optional[str] = None, departamento: Optional[str] = None,
+    q: Optional[str] = None, user: dict = Depends(require_rh)
+):
+    flt = {}
+    if status:
+        flt["status"] = status
+    if departamento:
+        flt["departamento"] = departamento
+    if q:
+        flt["$or"] = [
+            {"nombre": {"$regex": q, "$options": "i"}},
+            {"rfc": {"$regex": q, "$options": "i"}},
+            {"curp": {"$regex": q, "$options": "i"}},
+            {"puesto": {"$regex": q, "$options": "i"}},
+        ]
+    items = await db.empleados.find(flt, {"_id": 0}).sort("created_at", -1).to_list(500)
+    for e in items:
+        e["prestaciones"] = _calcular_prestaciones(e)
+    return items
+
+
+@api.get("/rh/alertas")
+async def rh_alertas(user: dict = Depends(require_rh)):
+    """Alertas RH: aniversarios próximos, cert. médicos por vencer, DC-3 por vencer."""
+    out = []
+    empleados = await db.empleados.find({"status": "activo"}, {"_id": 0}).to_list(500)
+    for e in empleados:
+        p = _calcular_prestaciones(e)
+        if p.get("dias_para_aniversario") is not None and p["dias_para_aniversario"] <= 30:
+            out.append({
+                "tipo": "aniversario", "empleado_id": e["id"], "nombre": e["nombre"],
+                "dias": p["dias_para_aniversario"], "mensaje": f"{e['nombre']} cumple aniversario en {p['dias_para_aniversario']} días",
+                "anios_proximos": p["antiguedad_anios"] + 1,
+                "vacaciones_proximo": p["vacaciones_proximo_periodo"],
+            })
+    # cert médicos / DC-3 con vencimiento próximo
+    today = now_utc().date()
+    docs = await db.empleados_docs.find({"vigencia": {"$ne": None, "$exists": True}}, {"_id": 0}).to_list(1000)
+    for d in docs:
+        try:
+            vig = datetime.fromisoformat(d["vigencia"]).date() if "T" not in d["vigencia"] else datetime.fromisoformat(d["vigencia"].replace("Z","+00:00")).date()
+            dias = (vig - today).days
+            if -30 <= dias <= 60:
+                emp = next((x for x in empleados if x["id"] == d["empleado_id"]), None)
+                if emp:
+                    out.append({
+                        "tipo": d["tipo"], "empleado_id": d["empleado_id"], "nombre": emp["nombre"],
+                        "dias": dias, "vigencia": d["vigencia"],
+                        "mensaje": f"{TIPOS_DOC_RH.get(d['tipo'], d['tipo'])} de {emp['nombre']} {'vence en '+str(dias)+' días' if dias>=0 else 'venció hace '+str(-dias)+' días'}",
+                    })
+        except Exception:
+            pass
+    return sorted(out, key=lambda x: x.get("dias", 999))
+
+
+@api.get("/rh/empleados/{eid}")
+async def rh_get_empleado(eid: str, user: dict = Depends(require_rh)):
+    e = await db.empleados.find_one({"id": eid}, {"_id": 0})
+    if not e:
+        raise HTTPException(404, "Empleado no encontrado")
+    e["prestaciones"] = _calcular_prestaciones(e)
+    e["documentos"] = await db.empleados_docs.find({"empleado_id": eid}, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
+    e["vacaciones"] = await db.empleados_vacaciones.find({"empleado_id": eid}, {"_id": 0}).sort("fecha_inicio", -1).to_list(200)
+    gozadas = sum(v["dias"] for v in e["vacaciones"] if v.get("estatus") == "gozadas")
+    e["prestaciones"]["vacaciones_gozadas"] = gozadas
+    e["prestaciones"]["vacaciones_pendientes"] = max(0, e["prestaciones"]["vacaciones_anuales_periodo_actual"] - gozadas)
+    return e
+
+
+@api.patch("/rh/empleados/{eid}")
+async def rh_update_empleado(eid: str, payload: EmpleadoUpdate, user: dict = Depends(require_rh)):
+    upd = {k: v for k, v in payload.dict().items() if v is not None}
+    if upd.get("status") == "baja" and not upd.get("fecha_baja"):
+        upd["fecha_baja"] = iso(now_utc())
+    r = await db.empleados.update_one({"id": eid}, {"$set": upd})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Empleado no encontrado")
+    return {"ok": True}
+
+
+@api.delete("/rh/empleados/{eid}")
+async def rh_delete_empleado(eid: str, user: dict = Depends(require_rh)):
+    # baja lógica + opcional borrar docs (no se borran de GridFS)
+    await db.empleados.update_one({"id": eid}, {"$set": {"status": "baja", "fecha_baja": iso(now_utc())}})
+    return {"ok": True}
+
+
+@api.post("/rh/empleados/{eid}/documentos")
+async def rh_upload_doc(
+    eid: str,
+    tipo: str = Form(...),
+    archivo: UploadFile = File(...),
+    descripcion: str = Form(""),
+    vigencia: str = Form(""),
+    tema: str = Form(""),
+    instructor: str = Form(""),
+    user: dict = Depends(require_rh),
+):
+    if tipo not in TIPOS_DOC_RH:
+        raise HTTPException(400, f"tipo invalido. Validos: {list(TIPOS_DOC_RH.keys())}")
+    emp = await db.empleados.find_one({"id": eid}, {"_id": 0, "id": 1, "nombre": 1})
+    if not emp:
+        raise HTTPException(404, "Empleado no encontrado")
+    content = await archivo.read()
+    if len(content) > 15 * 1024 * 1024:
+        raise HTTPException(400, "Archivo > 15 MB")
+    fname = archivo.filename or f"{tipo}.pdf"
+    file_id = await gridfs_bucket.upload_from_stream(fname, content, metadata={"empleado_id": eid, "tipo": tipo})
+    doc = {
+        "id": new_id(), "empleado_id": eid, "tipo": tipo,
+        "filename": fname, "content_type": archivo.content_type or "application/pdf",
+        "size": len(content), "descripcion": descripcion, "vigencia": vigencia or None,
+        "tema": tema or None, "instructor": instructor or None,
+        "file_id": str(file_id), "uploaded_by": user["id"], "uploaded_at": iso(now_utc()),
+    }
+    await db.empleados_docs.insert_one(doc)
+    await db.empleados.update_one({"id": eid}, {"$inc": {"documentos_count": 1}})
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/rh/empleados/{eid}/documentos/{doc_id}")
+async def rh_download_doc(eid: str, doc_id: str, user: dict = Depends(require_rh)):
+    doc = await db.empleados_docs.find_one({"id": doc_id, "empleado_id": eid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Documento no encontrado")
+    from bson import ObjectId as _OID
+    stream = await gridfs_bucket.open_download_stream(_OID(doc["file_id"]))
+    data = await stream.read()
+    import io as _io
+    return StreamingResponse(
+        _io.BytesIO(data), media_type=doc.get("content_type", "application/pdf"),
+        headers={"Content-Disposition": f'attachment; filename="{doc["filename"]}"'},
+    )
+
+
+@api.delete("/rh/empleados/{eid}/documentos/{doc_id}")
+async def rh_delete_doc(eid: str, doc_id: str, user: dict = Depends(require_rh)):
+    doc = await db.empleados_docs.find_one({"id": doc_id, "empleado_id": eid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Documento no encontrado")
+    from bson import ObjectId as _OID
+    try:
+        await gridfs_bucket.delete(_OID(doc["file_id"]))
+    except Exception:
+        pass
+    await db.empleados_docs.delete_one({"id": doc_id})
+    await db.empleados.update_one({"id": eid}, {"$inc": {"documentos_count": -1}})
+    return {"ok": True}
+
+
+@api.post("/rh/empleados/{eid}/vacaciones")
+async def rh_add_vacaciones(eid: str, payload: VacacionesIn, user: dict = Depends(require_rh)):
+    if not await db.empleados.find_one({"id": eid}, {"_id": 0, "id": 1}):
+        raise HTTPException(404, "Empleado no encontrado")
+    rec = payload.dict()
+    rec["id"] = new_id()
+    rec["empleado_id"] = eid
+    rec["created_at"] = iso(now_utc())
+    rec["created_by"] = user["id"]
+    await db.empleados_vacaciones.insert_one(rec)
+    rec.pop("_id", None)
+    return rec
+
+
+@api.delete("/rh/empleados/{eid}/vacaciones/{vid}")
+async def rh_delete_vacaciones(eid: str, vid: str, user: dict = Depends(require_rh)):
+    r = await db.empleados_vacaciones.delete_one({"id": vid, "empleado_id": eid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Periodo no encontrado")
+    return {"ok": True}
+
+
+def _build_expediente_pdf(emp: dict, docs: List[dict], vacaciones: List[dict]) -> bytes:
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.pdfgen import canvas
+    import io as _io
+    buf = _io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=LETTER)
+    W, H = LETTER
+    AMBER = colors.HexColor("#F59E0B")
+    DARK = colors.HexColor("#0A0A0A")
+    GREY = colors.HexColor("#52525B")
+
+    def header(title: str, sub: str = ""):
+        c.setFillColor(DARK)
+        c.rect(0, H - 2.5 * cm, W, 2.5 * cm, fill=1, stroke=0)
+        c.setFillColor(AMBER)
+        c.rect(0, H - 2.5 * cm, 1.2 * cm, 2.5 * cm, fill=1, stroke=0)
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(1.6 * cm, H - 1.3 * cm, "DEYMA · EXPEDIENTE DE PERSONAL")
+        c.setFillColor(AMBER)
+        c.setFont("Helvetica", 8)
+        c.drawString(1.6 * cm, H - 1.9 * cm, "CONSTRUCCIONES S.A. DE C.V. · DEPARTAMENTO DE RH")
+        c.setFillColor(GREY)
+        c.setFont("Helvetica", 7)
+        c.drawRightString(W - 1.5 * cm, H - 1.5 * cm, title)
+        if sub:
+            c.drawRightString(W - 1.5 * cm, H - 1.9 * cm, sub)
+
+    p = _calcular_prestaciones(emp)
+    gozadas = sum(v["dias"] for v in vacaciones if v.get("estatus") == "gozadas")
+    pendientes = max(0, p["vacaciones_anuales_periodo_actual"] - gozadas)
+
+    # Page 1: datos personales
+    header(f"FOLIO {emp['id'][:8].upper()}", f"GENERADO {now_utc().strftime('%d/%m/%Y %H:%M')}")
+    y = H - 3.5 * cm
+    c.setFillColor(DARK)
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(1.5 * cm, y, emp["nombre"].upper())
+    y -= 0.6 * cm
+    c.setFillColor(GREY)
+    c.setFont("Helvetica", 9)
+    c.drawString(1.5 * cm, y, f"{emp.get('puesto','')} · {emp.get('departamento','')} · {emp.get('status','').upper()}")
+    y -= 1.0 * cm
+
+    def section(title):
+        nonlocal y
+        c.setFillColor(AMBER)
+        c.rect(1.5 * cm, y, W - 3 * cm, 0.55 * cm, fill=1, stroke=0)
+        c.setFillColor(DARK)
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(1.7 * cm, y + 0.18 * cm, title.upper())
+        y -= 0.85 * cm
+
+    def kv(k, v, indent=0):
+        nonlocal y
+        c.setFillColor(GREY)
+        c.setFont("Helvetica-Bold", 7)
+        c.drawString(1.5 * cm + indent, y, k.upper())
+        c.setFillColor(DARK)
+        c.setFont("Helvetica", 10)
+        c.drawString(5.5 * cm + indent, y, str(v or "—"))
+        y -= 0.5 * cm
+
+    section("Datos de identificación")
+    kv("RFC", emp.get("rfc"))
+    kv("CURP", emp.get("curp"))
+    kv("NSS", emp.get("nss"))
+    kv("Teléfono", emp.get("tel"))
+    kv("Correo", emp.get("correo"))
+    kv("Domicilio", emp.get("domicilio"))
+
+    y -= 0.2 * cm
+    section("Datos laborales")
+    kv("Fecha de ingreso", emp.get("fecha_ingreso"))
+    if emp.get("fecha_baja"):
+        kv("Fecha de baja", emp["fecha_baja"][:10])
+    kv("Antigüedad", f"{p['antiguedad_anios']} años · {p['antiguedad_meses']} meses totales")
+    kv("Salario diario", f"$ {emp.get('salario_diario', 0):,.2f}")
+    kv("Salario mensual", f"$ {emp.get('salario_mensual', 0):,.2f}")
+    kv("Sueldo integrado", f"$ {emp.get('sueldo_integrado', 0):,.2f}")
+
+    y -= 0.2 * cm
+    section("Contacto de emergencia")
+    kv("Nombre", emp.get("contacto_emergencia_nombre"))
+    kv("Teléfono", emp.get("contacto_emergencia_tel"))
+
+    y -= 0.2 * cm
+    section("Prestaciones (LFT vigente)")
+    kv("Vacaciones periodo actual", f"{p['vacaciones_anuales_periodo_actual']} días")
+    kv("Vacaciones próximo periodo", f"{p['vacaciones_proximo_periodo']} días")
+    kv("Vacaciones gozadas (acum.)", f"{gozadas} días")
+    kv("Vacaciones pendientes", f"{pendientes} días")
+    kv("Aguinaldo", f"{p['aguinaldo_dias']} días")
+    kv("Prima vacacional", f"{p['prima_vacacional_pct']} %")
+    kv("Próximo aniversario", p.get("proximo_aniversario"))
+
+    # Page 2: documentos y vacaciones
+    c.showPage()
+    header("DOCUMENTOS EN EXPEDIENTE", f"{len(docs)} docs · {len(vacaciones)} periodos vac.")
+    y = H - 3.5 * cm
+    section("Documentos digitalizados")
+    if not docs:
+        c.setFillColor(GREY)
+        c.setFont("Helvetica", 9)
+        c.drawString(1.5 * cm, y, "Sin documentos cargados.")
+        y -= 0.5 * cm
+    else:
+        c.setFillColor(DARK)
+        c.setFont("Helvetica-Bold", 8)
+        c.drawString(1.5 * cm, y, "TIPO")
+        c.drawString(6.5 * cm, y, "ARCHIVO")
+        c.drawString(13.5 * cm, y, "FECHA")
+        c.drawString(17 * cm, y, "VIGENCIA")
+        y -= 0.4 * cm
+        c.setStrokeColor(GREY)
+        c.line(1.5 * cm, y, W - 1.5 * cm, y)
+        y -= 0.3 * cm
+        c.setFont("Helvetica", 8)
+        for d in docs:
+            if y < 3 * cm:
+                c.showPage()
+                header("DOCUMENTOS EN EXPEDIENTE (cont.)")
+                y = H - 3.5 * cm
+            c.drawString(1.5 * cm, y, TIPOS_DOC_RH.get(d["tipo"], d["tipo"])[:38])
+            c.drawString(6.5 * cm, y, (d.get("filename") or "")[:38])
+            c.drawString(13.5 * cm, y, (d.get("uploaded_at", "")[:10]))
+            c.drawString(17 * cm, y, (d.get("vigencia") or "—")[:10])
+            y -= 0.45 * cm
+
+    y -= 0.3 * cm
+    section("Historial de vacaciones")
+    if not vacaciones:
+        c.setFillColor(GREY)
+        c.setFont("Helvetica", 9)
+        c.drawString(1.5 * cm, y, "Sin periodos vacacionales registrados.")
+    else:
+        c.setFillColor(DARK)
+        c.setFont("Helvetica-Bold", 8)
+        c.drawString(1.5 * cm, y, "INICIO")
+        c.drawString(5 * cm, y, "FIN")
+        c.drawString(8.5 * cm, y, "DÍAS")
+        c.drawString(11 * cm, y, "ESTATUS")
+        c.drawString(14.5 * cm, y, "NOTA")
+        y -= 0.4 * cm
+        c.setStrokeColor(GREY)
+        c.line(1.5 * cm, y, W - 1.5 * cm, y)
+        y -= 0.3 * cm
+        c.setFont("Helvetica", 8)
+        for v in vacaciones:
+            if y < 3 * cm:
+                c.showPage()
+                y = H - 3 * cm
+            c.drawString(1.5 * cm, y, v.get("fecha_inicio", "")[:10])
+            c.drawString(5 * cm, y, v.get("fecha_fin", "")[:10])
+            c.drawString(8.5 * cm, y, str(v.get("dias", "")))
+            c.drawString(11 * cm, y, v.get("estatus", "").upper())
+            c.drawString(14.5 * cm, y, (v.get("nota", "") or "")[:30])
+            y -= 0.45 * cm
+
+    # Footer / cierre
+    c.setFillColor(DARK)
+    c.rect(0, 0, W, 1.2 * cm, fill=1, stroke=0)
+    c.setFillColor(AMBER)
+    c.setFont("Helvetica-Bold", 7)
+    c.drawString(1.5 * cm, 0.45 * cm, "DEYMA · CONFIDENCIAL · USO INTERNO RH")
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica", 6)
+    c.drawRightString(W - 1.5 * cm, 0.45 * cm, f"Generado {now_utc().strftime('%d/%m/%Y %H:%M')} · expediente {emp['id'][:8]}")
+
+    c.save()
+    return buf.getvalue()
+
+
+@api.get("/rh/empleados/{eid}/expediente")
+async def rh_expediente_pdf(eid: str, user: dict = Depends(require_rh)):
+    emp = await db.empleados.find_one({"id": eid}, {"_id": 0})
+    if not emp:
+        raise HTTPException(404, "Empleado no encontrado")
+    docs = await db.empleados_docs.find({"empleado_id": eid}, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
+    vac = await db.empleados_vacaciones.find({"empleado_id": eid}, {"_id": 0}).sort("fecha_inicio", -1).to_list(200)
+    pdf_bytes = await asyncio.to_thread(_build_expediente_pdf, emp, docs, vac)
+    import io as _io
+    safe_name = "".join(ch for ch in (emp.get("nombre") or "empleado") if ch.isalnum() or ch in "_-").upper()[:40] or "EMPLEADO"
+    return StreamingResponse(
+        _io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="DEYMA_expediente_{safe_name}.pdf"'},
+    )
+
+
 # ----------------------------------------------------------------------------
 # V2: Scraper Nocturno (Compranet + Tenders MX vía AI) + Scheduler
 # ----------------------------------------------------------------------------
