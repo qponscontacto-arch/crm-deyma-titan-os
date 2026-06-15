@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api, fmtMXN, formatApiError, downloadPdf } from "../lib/auth";
-import { Modal, EmptyState } from "../components/ui-deyma";
+import { EmptyState } from "../components/ui-deyma";
+import { Modal } from "../components/ui-deyma";
 import SeguimientoCotizacionModal from "../components/SeguimientoCotizacionModal";
-import { Plus, Trash2, FileText, Download, Eye } from "lucide-react";
+import { Plus, Trash2, Download, Eye } from "lucide-react";
 
 const ESTADO_BADGE = {
   borrador: "text-zinc-400 border-zinc-400/40",

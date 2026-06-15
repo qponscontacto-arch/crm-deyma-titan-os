@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, EmailStr, ConfigDict
+from pydantic import BaseModel, Field, EmailStr, ConfigDict, field_validator
 
 # ----------------------------------------------------------------------------
 # DB & app setup
@@ -1578,6 +1578,13 @@ class RegistrarRespuestaIn(BaseModel):
     fecha: Optional[str] = None  # ISO; default ahora
     adjuntos: Optional[List[dict]] = []  # [{nombre, tipo, tamano_bytes}]
     sentimiento: Optional[Literal["positivo", "neutro", "negativo"]] = "neutro"
+
+    @field_validator("de_email", mode="before")
+    @classmethod
+    def _empty_to_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
 
 class MarcarEstadoIn(BaseModel):

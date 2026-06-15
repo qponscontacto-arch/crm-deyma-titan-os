@@ -328,7 +328,10 @@ function ReplyFormModal({ data, setData, onClose, onSaved, cotizacionId }) {
   const submit = async (e) => {
     e.preventDefault(); setBusy(true); setErr("");
     try {
-      await api.post(`/cotizaciones/${cotizacionId}/respuesta`, data);
+      const payload = { ...data };
+      if (!payload.de_email || !payload.de_email.trim()) delete payload.de_email;
+      if (!payload.fecha) delete payload.fecha;
+      await api.post(`/cotizaciones/${cotizacionId}/respuesta`, payload);
       onSaved();
     } catch (e) { setErr(formatApiError(e)); }
     finally { setBusy(false); }

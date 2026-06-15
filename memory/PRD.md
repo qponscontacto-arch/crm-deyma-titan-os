@@ -294,7 +294,23 @@ Wireframes implementados en código (no Figma) en:
    - `DEYMA_ALERT_PHONE=whatsapp:+521442XXXXXXX`
 4. `sudo supervisorctl restart backend` y listo — las alertas se envían reales sin tocar código.
 
-### V3 P1 entregada (3ª iteración · HOY)
+### V3.5 entregada (4ª iteración · HOY)
+- ✅ **Panel de Seguimiento a Cotizaciones** completo: el preview modal del cotizador se convirtió en un panel con 4 pestañas (Resumen / Correos / Respuestas / Historia) y herramientas de acción contextual.
+- ✅ **Flujo de estados extendido**: `borrador → aprobada_direccion (Director o Comercial aprueba + envía correo) → aceptada / rechazada`. Una vez en estado final se bloquea re-aprobación.
+- ✅ **Envío de correo vía SendGrid** con **fallback MOCK transparente** (sin keys = se guarda el correo en `outbound_emails` con `status=queued_mock, mock=true`). Cuando llenes `SENDGRID_API_KEY` y `SENDGRID_FROM_EMAIL` en `.env` pasa a envío real automáticamente.
+- ✅ **PDF de cotización adjuntado automáticamente** al correo enviado.
+- ✅ **Plantilla HTML pre-rellenada y editable** antes de enviar (asunto, body HTML, body texto, CC opcional). Incluye membrete DEYMA, tabla de partidas, totales y firma del usuario que envía.
+- ✅ **Registro manual de respuestas del cliente** con: remitente nombre/email opcional, asunto, contenido (pegar tal cual), fecha, **sentimiento** (positivo/neutro/negativo).
+- ✅ **Marcar aceptada/rechazada** con nota de cierre obligatoria para historial auditable.
+- ✅ **Historia completa de eventos**: aprobación+envío, respuestas, cambios de estado — con actor, rol y timestamp.
+- ✅ **Role guards**: director y comercial pueden aprobar/enviar/registrar respuestas/marcar. Operaciones obtiene 403.
+- ✅ **Bug fix HIGH**: validador `field_validator(mode='before')` en `RegistrarRespuestaIn.de_email` que coerce empty string → None + frontend strip antes de POST. Acepta respuestas de clientes sin email.
+
+### Testing iter 4
+- Backend: **10/10 V3.5** (100%) + 49/50 regresión completa (solo 1 502 transitorio en `/api/scraper/score-batch` por timeout de ingress en batch largos)
+- Frontend: 85% inicialmente → **100% tras fix** del 422 con `de_email` vacío
+
+### V3 P1 entregada (3ª iteración previa)
 - ✅ **Mapa de toda la República Mexicana**: BBOX expandido de Bajío a 14.4°-32.8°N · -118.5° a -86.5°W. 30 ciudades industriales (Tijuana, Hermosillo, Cd. Juárez, Monterrey, Saltillo, Reynosa, Bajío completo, Guadalajara, CDMX, Puebla, Mérida, Cancún, Villahermosa, etc.). 3 sub-polígonos schemáticos: México continental + Baja California Sur + Yucatán + línea de frontera USA.
 - ✅ **+16 empresas seed** distribuidas por toda la República: Tesla Gigafactory NL, Kia Pesquería, Volkswagen Puebla, Audi San José Chiapa, Ford Hermosillo, Cemex Mérida, Pemex Dos Bocas (Tabasco), Honda Jalisco, Tijuana Industrial Park, Hofusan, Toyota Apaseo, Mabe Saltillo, Bachoco Mérida, Equinix MX1, etc.
 - ✅ **+13 proyectos radar seed** en estados nuevos: Coahuila, Nuevo León, Puebla, Tabasco, Baja California, Sonora, Yucatán, Jalisco.
