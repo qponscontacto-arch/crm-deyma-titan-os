@@ -1,0 +1,42 @@
+{
+  "summary": "V4.8 Ruta de Ventas IA + Gastos de Viajero testeado end-to-end. Backend pytest 34/36 PASS, 1 SKIPPED (test_corredor_morelia_queretaro) y 1 FAILED (test_local_morelia) AMBOS por rate-limit 429 de Nominatim OSM (externo, NO bug de la app — Nominatim respondió HTML '429 Too many requests' al hit directo). RBAC perfecto: comercial/director/socio acceden a TODOS los endpoints de ruta-ventas/* y gastos-viajero/*, operaciones recibe 403 en todos. Validaciones backend OK: origen vacío/no geocodificable → 400, tipo de gasto inválido → 400, monto negativo → 400, archivo > 10 MB → 400. CRUD rutas correcto: guardar genera UUID, comercial sólo ve sus rutas, director ve todas, delete con filtro vendedor_id. PDF /ruta-ventas/pdf con payload sintético → application/pdf válido (header %PDF-, >30 KB) incluyendo membrete + staticmap + briefing. Gastos CRUD: POST multipart con/sin archivo guarda en GridFS, GET filtros (fecha_desde/hasta/tipo) devuelven {items,total,por_tipo,n}, comercial sólo ve sus gastos, director ve todos. GET /file de otro vendedor → 403 explícito. DELETE de otro vendedor → 404 (filtro by vendedor_id, by design). Regresión OK: /auth/login, /dashboard/kpis, /cotizaciones, /clientes, /rh/empleados, /radar siguen 200. Frontend Playwright: comercial ve nav-ruta-ventas y nav-gastos; operaciones NO los ve y al navegar directo recibe ruta-denied/gastos-denied. Página /admin/ruta-ventas con TODOS los testids esperados (modo-corredor, modo-local, ruta-origen, ruta-destino oculto en modo local, ruta-detectar, ruta-desvio, ruta-paradas, ruta-fecha, ruta-generar, ruta-history-btn, ruta-empty). Click en ruta-history-btn abre ruta-history-panel. Página /admin/gastos con gastos-stats, gasto-add-btn, modal gasto-modal con TODOS los tipos (gasolina/casetas/comida/hospedaje/estacionamiento/otros) + monto/fecha/lugar/desc/file/submit. Creación end-to-end UI: gasto creado vía modal aparece en tabla. CERO bloqueantes.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/ruta-ventas/generar", "issue": "Nominatim OSM público (nominatim.openstreetmap.org) está rate-limited (HTTP 429) en este ambiente — afecta tests locales con queries cortas ('Morelia'). Comportamiento esperado del endpoint: devuelve 400 con detail 'No se pudo geocodificar el origen'. NO ES BUG NUESTRO (servicio externo). Mitigación recomendada: pre-poblar _GEOCODE_CACHE con las ciudades más comunes del Bajío, o configurar User-Agent con email de contacto para subir el rate-limit."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v48_ruta_gastos.py",
+    "/app/test_reports/pytest/pytest_v48_results.xml"
+  ],
+  "action_items": [
+    "Opcional: pre-poblar _GEOCODE_CACHE en startup con coordenadas hardcodeadas de ciudades clave (Morelia, Querétaro, Salamanca, Celaya, León, Aguascalientes, San Luis Potosí, CDMX, Guadalajara, Monterrey) para mitigar el rate-limit de Nominatim. Bajo impacto.",
+    "Opcional: agregar tabla de paradas (incluso vacía) en el PDF cuando paradas=[] para que el ReportLab no truene si el payload viene sin paradas (verificar en _build_ruta_pdf que no se asume paradas>0)."
+  ],
+  "critical_code_review_comments": [
+    "server.py llega a 3793 líneas — pendiente split por dominio (V4.8 añadió ~400 líneas más). Recomendar mover ruta-ventas + gastos a /app/backend/modules/ventas.py en próxima iteración.",
+    "_GEOCODE_CACHE es dict en memoria sin TTL ni límite de tamaño. Para volumen alto convendría LRU + persistencia en MongoDB collection geocode_cache con TTL 30 días.",
+    "/ruta-ventas/generar invoca Nominatim 2 veces (origen+destino) secuencialmente sin paralelizar — puede paralelizarse con asyncio.gather para ~50% latencia menos.",
+    "Validar payload de /ruta-ventas/guardar con un BaseModel en lugar de payload:dict mejora seguridad de tipos (hoy acepta cualquier estructura, incluso paradas sin lat/lng).",
+    "/ruta-ventas/pdf también recibe payload:dict; tolerable porque sólo lo usa el front después de generar, pero conviene un PdfIn que valide al menos {origen.lat, origen.lng, paradas:[{lat,lng,empresa_nombre}]}.",
+    "GastoIn está definido pero NO se usa en POST /gastos-viajero (porque es multipart Form); se puede eliminar la clase para evitar dead code.",
+    "DELETE gasto borra archivo GridFS con try/except silencioso (línea 3504) — está bien para idempotencia pero conviene loguear el error para auditoría.",
+    "_build_ruta_pdf hace import de reportlab, staticmap, polyline DENTRO de la función igual que _build_cotizacion_pdf — patrón consistente."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v48_ruta_gastos.py (nuevo, 36 tests)"
+  ],
+  "success_rate": {"backend": "94% (34/36, 1 skipped + 1 failed AMBOS por rate-limit Nominatim externo)", "frontend": "100%"},
+  "test_credentials": "director@deyma.mx/Deyma2026!, socio@deyma.mx/Socio2026!, comercial@deyma.mx/Comercial2026!, operaciones@deyma.mx/Operaciones2026! — todos funcionan, operaciones recibe 403/denied como diseñado",
+  "seed_data_creation": "Ninguna persistente. Tests crean rutas/gastos con prefijo TEST_ y limpian al final (test_cleanup). El gasto creado vía UI fue limpiado manualmente con script.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "V4.8 está estable. Si re-testeas y Nominatim sigue 429, hacer fixture con _GEOCODE_CACHE poblado o mock httpx para no depender del servicio externo. Endpoints clave: POST /api/ruta-ventas/generar (origen str, modo='corredor'|'local'), POST /api/ruta-ventas/guardar, GET /api/ruta-ventas, DELETE /api/ruta-ventas/{id}, POST /api/ruta-ventas/pdf (acepta payload dict), POST /api/gastos-viajero (multipart con archivo opcional <=10MB), GET /api/gastos-viajero (filtros: fecha_desde, fecha_hasta, tipo, vendedor_id), GET /api/gastos-viajero/{gid}/file, DELETE /api/gastos-viajero/{gid}. RBAC: require_roles('comercial','director','socio'). Comercial sólo ve/borra los suyos; director/socio ven todos. Frontend: AdminRutaVentasPage.jsx (376 líneas, react-leaflet MapContainer), AdminGastosPage.jsx (252 líneas con modal GastoForm). Rutas en App.js: /admin/ruta-ventas y /admin/gastos. Nav definido en AppLayout.jsx con roles=['comercial','director','socio'].",
+  "rca of the issue": "El único 'fallo' (test_local_morelia) es por Nominatim rate-limit 429 — confirmado con curl directo a https://nominatim.openstreetmap.org/search?q=Morelia&format=json devolviendo HTML '429 Too many requests'. Reproducción: hacer >1 req/sec a Nominatim sin User-Agent custom con email. Mitigación: 1) pre-poblar _GEOCODE_CACHE en startup, 2) usar un servicio de geocoding propio o de pago (LocationIQ, Mapbox), 3) reintentos con backoff exponencial en _geocode. NO es bug de la app — el endpoint /ruta-ventas/generar maneja el fallo correctamente devolviendo 400 con detail claro."
+}

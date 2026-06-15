@@ -1,7 +1,7 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
-import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus, Users2 } from "lucide-react";
+import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus, Users2, Navigation, Wallet } from "lucide-react";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testId: "nav-dashboard" },
@@ -10,6 +10,8 @@ const NAV = [
   { to: "/crm", label: "CRM Comercial", icon: Users, testId: "nav-crm" },
   { to: "/cotizador", label: "Cotizador", icon: FileText, testId: "nav-cotizador" },
   { to: "/mapa", label: "Mapa México", icon: Map, testId: "nav-mapa" },
+  { to: "/admin/ruta-ventas", label: "Ruta de Ventas IA", icon: Navigation, testId: "nav-ruta-ventas", roles: ["comercial", "director", "socio"] },
+  { to: "/admin/gastos", label: "Gastos de Viajero", icon: Wallet, testId: "nav-gastos", roles: ["comercial", "director", "socio"] },
   { to: "/obras", label: "Obras", icon: Hammer, testId: "nav-obras" },
   { to: "/tareas", label: "Mis Tareas", icon: ListTodo, testId: "nav-tareas" },
   { to: "/alertas", label: "Alertas HOT", icon: Bell, testId: "nav-alertas" },

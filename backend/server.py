@@ -9,7 +9,7 @@ import uuid
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Tuple
 
 import bcrypt
 import jwt
@@ -2900,6 +2900,613 @@ async def rh_expediente_pdf(eid: str, user: dict = Depends(require_rh)):
         _io.BytesIO(pdf_bytes), media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="DEYMA_expediente_{safe_name}.pdf"'},
     )
+
+
+# ============================================================================
+# V4.8 · Ruta de Ventas IA + Gastos de Viajero
+# Acceso: comercial, director, socio
+# ============================================================================
+require_ventas = require_roles("comercial", "director", "socio")
+
+OSRM_BASE = "https://router.project-osrm.org"
+NOMINATIM_BASE = "https://nominatim.openstreetmap.org"
+
+# Cache simple en memoria para geocode (clave: query lowercased)
+_GEOCODE_CACHE: dict = {}
+
+
+async def _geocode(query: str) -> Optional[dict]:
+    """Geocodifica una dirección/ciudad usando Nominatim (OSM). Devuelve {lat, lng, display_name}."""
+    if not query:
+        return None
+    key = query.strip().lower()
+    if key in _GEOCODE_CACHE:
+        return _GEOCODE_CACHE[key]
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": "DEYMA-Radar/1.0 (ventas)"}) as cli:
+            r = await cli.get(f"{NOMINATIM_BASE}/search", params={
+                "q": query, "format": "json", "limit": 1, "countrycodes": "mx", "addressdetails": 1,
+            })
+            r.raise_for_status()
+            data = r.json()
+            if not data:
+                return None
+            it = data[0]
+            res = {
+                "lat": float(it["lat"]),
+                "lng": float(it["lon"]),
+                "display_name": it.get("display_name", query),
+            }
+            _GEOCODE_CACHE[key] = res
+            return res
+    except Exception as e:
+        logger.warning(f"geocode error '{query}': {e}")
+        return None
+
+
+async def _osrm_route(coords: List[Tuple[float, float]]) -> Optional[dict]:
+    """coords: lista de (lng, lat). Devuelve {distance_m, duration_s, geometry (polyline encoded)}."""
+    if len(coords) < 2:
+        return None
+    import httpx
+    coords_str = ";".join(f"{lng},{lat}" for lng, lat in coords)
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as cli:
+            r = await cli.get(f"{OSRM_BASE}/route/v1/driving/{coords_str}",
+                              params={"overview": "full", "geometries": "polyline"})
+            r.raise_for_status()
+            data = r.json()
+            if data.get("code") != "Ok" or not data.get("routes"):
+                return None
+            route = data["routes"][0]
+            return {
+                "distance_km": round(route["distance"] / 1000, 1),
+                "duration_min": round(route["duration"] / 60, 0),
+                "geometry": route["geometry"],
+                "legs": route.get("legs", []),
+            }
+    except Exception as e:
+        logger.warning(f"OSRM error: {e}")
+        return None
+
+
+def _haversine_km(lat1, lng1, lat2, lng2) -> float:
+    """Distancia en km."""
+    from math import radians, sin, cos, sqrt, atan2
+    R = 6371.0
+    dlat = radians(lat2 - lat1)
+    dlng = radians(lng2 - lng1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng / 2) ** 2
+    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def _dist_punto_a_segmento(px, py, ax, ay, bx, by) -> float:
+    """Distancia de un punto a un segmento, en grados (aprox; suficiente para corredor)."""
+    dx, dy = bx - ax, by - ay
+    if dx == 0 and dy == 0:
+        return ((px - ax) ** 2 + (py - ay) ** 2) ** 0.5
+    t = max(0, min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    cx, cy = ax + t * dx, ay + t * dy
+    return _haversine_km(py, px, cy, cx)
+
+
+SCORE_ETAPA = {
+    "prospeccion": 0.2, "calificada": 0.5, "propuesta": 0.8, "negociacion": 1.0,
+    "ganada": 0.1, "perdida": 0.0,
+}
+
+
+async def _candidatos_en_corredor(origen: dict, destino: Optional[dict], max_desvio_km: float, radio_local_km: float = 50) -> List[dict]:
+    """Devuelve lista de paradas candidatas con score, monto, etapa, distancia al corredor."""
+    empresas = await db.empresas.find({"lat": {"$ne": None}, "lng": {"$ne": None}}, {"_id": 0}).to_list(2000)
+    opps = await db.oportunidades.find({}, {"_id": 0}).to_list(2000)
+    opps_by_emp: dict = {}
+    for o in opps:
+        opps_by_emp.setdefault(o["empresa_id"], []).append(o)
+
+    today = now_utc().date()
+    out = []
+    for emp in empresas:
+        lat, lng = emp.get("lat"), emp.get("lng")
+        if lat is None or lng is None:
+            continue
+        # distancia al corredor o al origen
+        if destino:
+            dist_corr = _dist_punto_a_segmento(
+                lng, lat, origen["lng"], origen["lat"], destino["lng"], destino["lat"]
+            )
+        else:
+            dist_corr = _haversine_km(lat, lng, origen["lat"], origen["lng"])
+        threshold = max_desvio_km if destino else radio_local_km
+        if dist_corr > threshold:
+            continue
+        emp_opps = opps_by_emp.get(emp["id"], [])
+        monto_total = sum((o.get("monto_estimado") or 0) for o in emp_opps if o.get("estado") not in ("ganada", "perdida"))
+        mejor_etapa = max((SCORE_ETAPA.get(o.get("estado", ""), 0) for o in emp_opps), default=0)
+        # última actividad
+        ultima_act_dias = None
+        if emp_opps:
+            fechas = []
+            for o in emp_opps:
+                ts = o.get("updated_at") or o.get("created_at")
+                if not ts:
+                    continue
+                try:
+                    fechas.append(datetime.fromisoformat(ts.replace("Z", "+00:00")).date())
+                except Exception:
+                    continue
+            if fechas:
+                ultima_act_dias = (today - max(fechas)).days
+        radar_max = 0
+        for o in emp_opps:
+            radar_max = max(radar_max, (o.get("score") or 0))
+        # Score combinado (0-100)
+        s_monto = min(monto_total / 5_000_000, 1.0) * 35  # cap a 5M MXN
+        s_etapa = mejor_etapa * 25
+        s_radar = (radar_max / 100) * 25
+        s_freshness = 15 if ultima_act_dias is None else max(0, 15 - (ultima_act_dias / 30) * 5)
+        score = round(s_monto + s_etapa + s_radar + s_freshness, 1)
+        out.append({
+            "empresa_id": emp["id"],
+            "empresa_nombre": emp.get("nombre", "—"),
+            "lat": lat, "lng": lng,
+            "ciudad": emp.get("ciudad", ""),
+            "estado_geo": emp.get("estado", ""),
+            "rfc": emp.get("rfc", ""),
+            "monto_total": monto_total,
+            "n_oportunidades": len([o for o in emp_opps if o.get("estado") not in ("ganada", "perdida")]),
+            "mejor_etapa": next((o["estado"] for o in emp_opps if SCORE_ETAPA.get(o.get("estado"), 0) == mejor_etapa), "prospeccion"),
+            "ultima_actividad_dias": ultima_act_dias,
+            "radar_score": radar_max,
+            "score": score,
+            "desvio_km": round(dist_corr, 1),
+        })
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out
+
+
+def _orden_geo_secuencial(origen: dict, candidatos: List[dict], destino: Optional[dict]) -> List[dict]:
+    """Ordena las paradas según avance lineal desde origen hacia destino (proyección sobre segmento)."""
+    if not destino:
+        # local: ordenar por distancia al origen ascendente
+        return sorted(candidatos, key=lambda c: _haversine_km(origen["lat"], origen["lng"], c["lat"], c["lng"]))
+    ax, ay = origen["lng"], origen["lat"]
+    bx, by = destino["lng"], destino["lat"]
+    dx, dy = bx - ax, by - ay
+    norm2 = (dx * dx + dy * dy) or 1
+    def t_proj(c):
+        return ((c["lng"] - ax) * dx + (c["lat"] - ay) * dy) / norm2
+    return sorted(candidatos, key=t_proj)
+
+
+class RutaIn(BaseModel):
+    origen: str
+    destino: Optional[str] = None
+    modo: str = "corredor"  # corredor | local
+    max_desvio_km: float = 30.0
+    radio_local_km: float = 50.0
+    max_paradas: int = 6
+    fecha: Optional[str] = None
+    nota: Optional[str] = None
+
+
+@api.post("/ruta-ventas/generar")
+async def ruta_generar(payload: RutaIn, user: dict = Depends(require_ventas)):
+    """Genera plan de ruta inteligente con IA. NO persiste; solo calcula."""
+    origen = await _geocode(payload.origen)
+    if not origen:
+        raise HTTPException(400, f"No se pudo geocodificar el origen '{payload.origen}'")
+    destino = await _geocode(payload.destino) if payload.destino else None
+    if payload.destino and not destino:
+        raise HTTPException(400, f"No se pudo geocodificar el destino '{payload.destino}'")
+
+    cands = await _candidatos_en_corredor(origen, destino, payload.max_desvio_km, payload.radio_local_km)
+    import json as _json
+    # Tomar top-N por score luego reordenar geográficamente
+    top = cands[: max(payload.max_paradas, 1)]
+    paradas = _orden_geo_secuencial(origen, top, destino)
+
+    # OSRM con waypoints: origen → paradas → destino (si hay)
+    coords = [(origen["lng"], origen["lat"])]
+    for p in paradas:
+        coords.append((p["lng"], p["lat"]))
+    if destino:
+        coords.append((destino["lng"], destino["lat"]))
+    route_geo = await _osrm_route(coords) if len(coords) >= 2 else None
+
+    # Briefing IA (silencioso si LLM falla, devolvemos fallback)
+    plan_ia = None
+    try:
+        system_msg = (
+            "Eres un agente de ventas especialista en construcción industrial (pisos, concreto, "
+            "mantenimiento) en México (Bajío/Centro). Generas planes de prospección PRODUCTIVOS y CONCISOS. "
+            "Devuelves SOLO JSON válido con la estructura: "
+            "{paradas: [{empresa_id, briefing, tiempo_min, accion_clave}], resumen_general, recomendacion_final}. "
+            "El briefing por parada debe ser 1-2 frases ACCIONABLES (qué decir, qué documento llevar, qué cerrar)."
+        )
+        prompt_user = _json.dumps({
+            "ruta": {"origen": origen["display_name"], "destino": destino["display_name"] if destino else None,
+                     "modo": payload.modo, "distancia_km": route_geo["distance_km"] if route_geo else None,
+                     "duracion_min": route_geo["duration_min"] if route_geo else None},
+            "paradas_propuestas": [
+                {
+                    "empresa_id": p["empresa_id"],
+                    "empresa": p["empresa_nombre"],
+                    "ciudad": p["ciudad"],
+                    "monto_total_mxn": p["monto_total"],
+                    "mejor_etapa": p["mejor_etapa"],
+                    "ultima_actividad_dias": p["ultima_actividad_dias"],
+                    "score_radar": p["radar_score"],
+                    "score_combinado": p["score"],
+                } for p in paradas
+            ],
+        }, ensure_ascii=False)
+        raw = await _llm_call(system_msg, prompt_user)
+        try:
+            plan_ia = _parse_json_block(raw)
+        except Exception:
+            plan_ia = {"raw": raw[:2000], "error_parse": True}
+    except HTTPException:
+        plan_ia = None
+    except Exception as e:
+        logger.warning(f"plan_ia error: {e}")
+        plan_ia = None
+
+    # mezclar briefing al objeto de paradas
+    briefing_by_emp = {}
+    if plan_ia and isinstance(plan_ia.get("paradas"), list):
+        for b in plan_ia["paradas"]:
+            briefing_by_emp[b.get("empresa_id")] = b
+    for p in paradas:
+        b = briefing_by_emp.get(p["empresa_id"], {})
+        p["briefing"] = b.get("briefing") or f"Visitar {p['empresa_nombre']}. Etapa: {p['mejor_etapa']}. Monto pipeline: ${p['monto_total']:,.0f}."
+        p["tiempo_min"] = b.get("tiempo_min") or 45
+        p["accion_clave"] = b.get("accion_clave") or ("Cierre" if p["mejor_etapa"] in ("propuesta", "negociacion") else "Detección")
+
+    return {
+        "origen": origen,
+        "destino": destino,
+        "modo": payload.modo,
+        "paradas": paradas,
+        "total_candidatos_corredor": len(cands),
+        "route": route_geo,
+        "plan_ia_resumen": (plan_ia or {}).get("resumen_general"),
+        "plan_ia_recomendacion": (plan_ia or {}).get("recomendacion_final"),
+        "generado_at": iso(now_utc()),
+        "generado_por": user.get("name") or user.get("email"),
+    }
+
+
+@api.post("/ruta-ventas/guardar")
+async def ruta_guardar(payload: dict, user: dict = Depends(require_ventas)):
+    """Guarda la ruta generada para histórico y poder ligar gastos."""
+    doc = {
+        "id": new_id(),
+        "origen": payload.get("origen"),
+        "destino": payload.get("destino"),
+        "modo": payload.get("modo"),
+        "paradas": payload.get("paradas", []),
+        "route": payload.get("route"),
+        "resumen": payload.get("plan_ia_resumen"),
+        "recomendacion": payload.get("plan_ia_recomendacion"),
+        "fecha": payload.get("fecha") or now_utc().strftime("%Y-%m-%d"),
+        "vendedor_id": user["id"],
+        "vendedor_nombre": user.get("name") or user.get("email"),
+        "created_at": iso(now_utc()),
+    }
+    await db.rutas_ventas.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/ruta-ventas")
+async def ruta_listar(user: dict = Depends(require_ventas)):
+    flt = {} if user["role"] in ("director", "socio") else {"vendedor_id": user["id"]}
+    items = await db.rutas_ventas.find(flt, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return items
+
+
+@api.delete("/ruta-ventas/{rid}")
+async def ruta_eliminar(rid: str, user: dict = Depends(require_ventas)):
+    flt = {"id": rid}
+    if user["role"] not in ("director", "socio"):
+        flt["vendedor_id"] = user["id"]
+    r = await db.rutas_ventas.delete_one(flt)
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Ruta no encontrada")
+    return {"ok": True}
+
+
+def _build_ruta_pdf(ruta: dict) -> bytes:
+    """PDF de plan de ruta con membrete DEYMA, mapa estático y briefing IA."""
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+    import io as _io
+    import os as _os
+    NAVY = colors.HexColor("#0F1F4D")
+    ORANGE = colors.HexColor("#F37021")
+    DARK = colors.HexColor("#1A1A1A")
+    GRAY = colors.HexColor("#6B7280")
+    LIGHT = colors.HexColor("#F5F5F5")
+
+    buf = _io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=LETTER,
+                            leftMargin=1.4 * cm, rightMargin=1.4 * cm,
+                            topMargin=0.6 * cm, bottomMargin=1.5 * cm,
+                            title=f"Plan de Ruta {ruta.get('id', '')[:8]}")
+    styles = getSampleStyleSheet()
+    body = ParagraphStyle("body", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=12, textColor=DARK)
+    body_sm = ParagraphStyle("bs", parent=body, fontSize=8, leading=10)
+    h2 = ParagraphStyle("h2", parent=body, fontSize=11, leading=14, fontName="Helvetica-Bold", textColor=NAVY)
+
+    story = []
+    header_path = _os.path.join(_os.path.dirname(__file__), "assets", "header_deyma.png")
+    if _os.path.exists(header_path):
+        img_w = 18.79 * cm
+        img_h = img_w / (1600 / 226)
+        story.append(RLImage(header_path, width=img_w, height=img_h))
+    story.append(Spacer(1, 0.3 * cm))
+
+    fecha_str = ruta.get("fecha", now_utc().strftime("%Y-%m-%d"))
+    story.append(Paragraph('<font color="#F37021"><b>PLAN DE RUTA · PROSPECCIÓN COMERCIAL</b></font>', h2))
+    info_data = [
+        [Paragraph("<b>Vendedor:</b>", body_sm), Paragraph(ruta.get("vendedor_nombre", "—"), body)],
+        [Paragraph("<b>Fecha:</b>", body_sm), Paragraph(fecha_str, body)],
+        [Paragraph("<b>Origen:</b>", body_sm), Paragraph((ruta.get("origen") or {}).get("display_name", "—"), body)],
+        [Paragraph("<b>Destino:</b>", body_sm), Paragraph(((ruta.get("destino") or {}).get("display_name") or "Prospección local"), body)],
+        [Paragraph("<b>Distancia / Duración:</b>", body_sm),
+         Paragraph(f"{(ruta.get('route') or {}).get('distance_km', '—')} km · {(ruta.get('route') or {}).get('duration_min', '—')} min", body)],
+        [Paragraph("<b>Paradas:</b>", body_sm), Paragraph(str(len(ruta.get("paradas") or [])), body)],
+    ]
+    story.append(Table(info_data, colWidths=[4 * cm, 13.8 * cm], style=TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ])))
+    story.append(Spacer(1, 0.3 * cm))
+
+    # Mapa estático
+    try:
+        from staticmap import StaticMap, CircleMarker, Line
+        smap = StaticMap(900, 500, url_template="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png")
+        # polyline
+        geom = (ruta.get("route") or {}).get("geometry")
+        if geom:
+            import polyline as _pl
+            pts = _pl.decode(geom)  # list of (lat, lng)
+            line = Line([(lng, lat) for lat, lng in pts], "#F37021", 4)
+            smap.add_line(line)
+        # markers
+        ori = ruta.get("origen") or {}
+        if ori.get("lng") and ori.get("lat"):
+            smap.add_marker(CircleMarker((ori["lng"], ori["lat"]), "#0F1F4D", 16))
+        for p in (ruta.get("paradas") or []):
+            smap.add_marker(CircleMarker((p["lng"], p["lat"]), "#F37021", 12))
+        dst = ruta.get("destino") or {}
+        if dst.get("lng") and dst.get("lat"):
+            smap.add_marker(CircleMarker((dst["lng"], dst["lat"]), "#10B981", 16))
+        img = smap.render(zoom=None)
+        map_buf = _io.BytesIO()
+        img.save(map_buf, format="PNG")
+        map_buf.seek(0)
+        story.append(RLImage(map_buf, width=18.5 * cm, height=10.3 * cm))
+    except Exception as e:
+        logger.warning(f"static map error: {e}")
+        story.append(Paragraph(f'<font color="#6B7280"><i>[Mapa no disponible: {str(e)[:80]}]</i></font>', body_sm))
+    story.append(Spacer(1, 0.3 * cm))
+
+    if ruta.get("resumen"):
+        story.append(Paragraph('<font color="#0F1F4D"><b>Resumen de la ruta:</b></font>', body))
+        story.append(Paragraph(ruta["resumen"], body_sm))
+        story.append(Spacer(1, 0.2 * cm))
+
+    # Tabla paradas
+    para_data = [["#", "EMPRESA", "CIUDAD", "ETAPA", "MONTO MXN", "SCORE"]]
+    for i, p in enumerate(ruta.get("paradas") or [], 1):
+        para_data.append([
+            str(i),
+            Paragraph(p.get("empresa_nombre", "—"), body_sm),
+            p.get("ciudad", "") or "—",
+            p.get("mejor_etapa", "—").upper(),
+            f"${(p.get('monto_total') or 0):,.0f}",
+            f"{p.get('score', 0):.0f}",
+        ])
+    t = Table(para_data, colWidths=[0.8 * cm, 6.5 * cm, 3.2 * cm, 3 * cm, 3 * cm, 2 * cm])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("ALIGN", (4, 0), (-1, -1), "RIGHT"),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT]),
+        ("FONTSIZE", (0, 1), (-1, -1), 8.5),
+        ("LINEBELOW", (0, 0), (-1, 0), 1.2, ORANGE),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D4D4D8")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 0.3 * cm))
+
+    # Briefing por parada
+    story.append(Paragraph('<font color="#0F1F4D"><b>Briefing de visita (IA):</b></font>', body))
+    story.append(Spacer(1, 0.1 * cm))
+    for i, p in enumerate(ruta.get("paradas") or [], 1):
+        story.append(Paragraph(
+            f'<font color="#F37021"><b>{i}. {p.get("empresa_nombre", "—")}</b></font> '
+            f'<font color="#6B7280" size="7">· {p.get("accion_clave", "Visita")} · {p.get("tiempo_min", 45)} min</font>',
+            body,
+        ))
+        story.append(Paragraph(p.get("briefing", "—"), body_sm))
+        story.append(Spacer(1, 0.15 * cm))
+
+    if ruta.get("recomendacion"):
+        story.append(Spacer(1, 0.2 * cm))
+        story.append(Paragraph('<font color="#0F1F4D"><b>Recomendación final del agente IA:</b></font>', body))
+        story.append(Paragraph(ruta["recomendacion"], body_sm))
+
+    def _footer(canvas, _doc):
+        canvas.saveState()
+        canvas.setStrokeColor(ORANGE)
+        canvas.setLineWidth(1.2)
+        canvas.line(1.4 * cm, 1.3 * cm, 20.2 * cm, 1.3 * cm)
+        canvas.setFont("Helvetica-Bold", 7)
+        canvas.setFillColor(NAVY)
+        canvas.drawString(1.4 * cm, 0.95 * cm, "DEYMA CONSTRUCCIONES S.A. DE C.V.")
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(GRAY)
+        canvas.drawString(1.4 * cm, 0.65 * cm, "Plan de prospección generado por IA · Uso interno comercial")
+        canvas.drawRightString(20.2 * cm, 0.65 * cm, f"Página {_doc.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    return buf.getvalue()
+
+
+@api.post("/ruta-ventas/pdf")
+async def ruta_pdf(payload: dict, user: dict = Depends(require_ventas)):
+    """Genera PDF desde un payload de ruta (sin necesidad de guardarla)."""
+    pdf_bytes = await asyncio.to_thread(_build_ruta_pdf, payload)
+    import io as _io
+    fecha = payload.get("fecha") or now_utc().strftime("%Y%m%d")
+    return StreamingResponse(
+        _io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="DEYMA_ruta_{fecha}.pdf"'},
+    )
+
+
+# ----- Gastos de Viajero -----
+TIPOS_GASTO = ["gasolina", "casetas", "comida", "hospedaje", "estacionamiento", "otros"]
+
+
+class GastoIn(BaseModel):
+    tipo: str
+    monto: float
+    fecha: str  # YYYY-MM-DD
+    descripcion: Optional[str] = ""
+    ruta_id: Optional[str] = None
+    lugar: Optional[str] = ""
+
+
+@api.post("/gastos-viajero")
+async def gasto_crear(
+    tipo: str = Form(...),
+    monto: float = Form(...),
+    fecha: str = Form(...),
+    descripcion: str = Form(""),
+    ruta_id: str = Form(""),
+    lugar: str = Form(""),
+    archivo: Optional[UploadFile] = File(None),
+    user: dict = Depends(require_ventas),
+):
+    if tipo not in TIPOS_GASTO:
+        raise HTTPException(400, f"tipo invalido. Validos: {TIPOS_GASTO}")
+    if monto < 0:
+        raise HTTPException(400, "monto debe ser >= 0")
+    file_id_str = None
+    filename = None
+    content_type = None
+    if archivo and archivo.filename:
+        content = await archivo.read()
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(400, "Archivo > 10 MB")
+        file_id = await gridfs_bucket.upload_from_stream(archivo.filename, content,
+                                                        metadata={"kind": "gasto_viaje", "user_id": user["id"]})
+        file_id_str = str(file_id)
+        filename = archivo.filename
+        content_type = archivo.content_type
+    doc = {
+        "id": new_id(),
+        "vendedor_id": user["id"],
+        "vendedor_nombre": user.get("name") or user.get("email"),
+        "tipo": tipo,
+        "monto": float(monto),
+        "fecha": fecha,
+        "descripcion": descripcion,
+        "ruta_id": ruta_id or None,
+        "lugar": lugar,
+        "file_id": file_id_str,
+        "filename": filename,
+        "content_type": content_type,
+        "created_at": iso(now_utc()),
+    }
+    await db.gastos_viaje.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/gastos-viajero")
+async def gastos_listar(
+    fecha_desde: Optional[str] = None,
+    fecha_hasta: Optional[str] = None,
+    tipo: Optional[str] = None,
+    vendedor_id: Optional[str] = None,
+    user: dict = Depends(require_ventas),
+):
+    flt: dict = {}
+    if tipo:
+        flt["tipo"] = tipo
+    if fecha_desde or fecha_hasta:
+        flt["fecha"] = {}
+        if fecha_desde:
+            flt["fecha"]["$gte"] = fecha_desde
+        if fecha_hasta:
+            flt["fecha"]["$lte"] = fecha_hasta
+    # comercial sólo ve los suyos; director/socio ven todos (o filtran por vendedor_id)
+    if user["role"] == "comercial":
+        flt["vendedor_id"] = user["id"]
+    elif vendedor_id:
+        flt["vendedor_id"] = vendedor_id
+    items = await db.gastos_viaje.find(flt, {"_id": 0}).sort("fecha", -1).to_list(1000)
+    total = sum(i["monto"] for i in items)
+    por_tipo: dict = {}
+    for i in items:
+        por_tipo[i["tipo"]] = por_tipo.get(i["tipo"], 0) + i["monto"]
+    return {"items": items, "total": total, "por_tipo": por_tipo, "n": len(items)}
+
+
+@api.get("/gastos-viajero/{gid}/file")
+async def gasto_file(gid: str, user: dict = Depends(require_ventas)):
+    g = await db.gastos_viaje.find_one({"id": gid}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Gasto no encontrado")
+    if user["role"] == "comercial" and g["vendedor_id"] != user["id"]:
+        raise HTTPException(403, "Solo puedes ver tus propios comprobantes")
+    if not g.get("file_id"):
+        raise HTTPException(404, "Sin archivo adjunto")
+    from bson import ObjectId as _OID
+    stream = await gridfs_bucket.open_download_stream(_OID(g["file_id"]))
+    data = await stream.read()
+    import io as _io
+    return StreamingResponse(
+        _io.BytesIO(data), media_type=g.get("content_type") or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{g.get("filename") or "comprobante"}"'},
+    )
+
+
+@api.delete("/gastos-viajero/{gid}")
+async def gasto_eliminar(gid: str, user: dict = Depends(require_ventas)):
+    flt = {"id": gid}
+    if user["role"] == "comercial":
+        flt["vendedor_id"] = user["id"]
+    g = await db.gastos_viaje.find_one(flt, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Gasto no encontrado o sin permiso")
+    if g.get("file_id"):
+        from bson import ObjectId as _OID
+        try:
+            await gridfs_bucket.delete(_OID(g["file_id"]))
+        except Exception:
+            pass
+    await db.gastos_viaje.delete_one(flt)
+    return {"ok": True}
 
 
 # ----------------------------------------------------------------------------

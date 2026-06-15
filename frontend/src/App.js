@@ -18,6 +18,8 @@ import ConsultaTramitePage from "@/pages/ConsultaTramitePage";
 import ClientePortalPage from "@/pages/ClientePortalPage";
 import AdminClientesPage from "@/pages/AdminClientesPage";
 import AdminRHPage from "@/pages/AdminRHPage";
+import AdminRutaVentasPage from "@/pages/AdminRutaVentasPage";
+import AdminGastosPage from "@/pages/AdminGastosPage";
 
 function ProtectedStaff({ children }) {
   const { user, cliente, loading } = useAuth();
@@ -63,6 +65,8 @@ function App() {
               <Route path="scraper" element={<ScraperPage />} />
               <Route path="admin/clientes" element={<AdminClientesPage />} />
               <Route path="admin/rh" element={<AdminRHPage />} />
+              <Route path="admin/ruta-ventas" element={<AdminRutaVentasPage />} />
+              <Route path="admin/gastos" element={<AdminGastosPage />} />
             </Route>
           </Routes>
         </AuthProvider>
