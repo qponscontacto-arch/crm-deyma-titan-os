@@ -1,0 +1,35 @@
+{
+  "summary": "V4.7 PDF Membrete (DEYMA vs FRECCIAMD) testeado end-to-end. 13/13 backend pytest PASS: PDFs marca=deyma y marca=frecciamd retornan 200 application/pdf con sufijo correcto en Content-Disposition, peso >50KB (header image embebida — DEYMA ~91KB, FRECCIAMD ~127KB), texto del PDF contiene folio, encabezados de tabla (CONCEPTO/UNIDAD/CÓDIGO/TOTAL), las 10 observaciones generales (verificadas 3 representativas), y la razón social correcta en el footer (DEYMA: 'DEYMA CONSTRUCCIONES S.A. DE C.V.', FRECCIAMD: 'FRECCIA MD S.A. DE C.V.', mutuamente excluyentes). Default sin parámetro = deyma. marca='otra' devuelve 400 con detail correcto. Regresión OK: /api/dashboard/kpis, /api/cotizaciones, /api/empresas, /api/auth/login, /api/clientes, /api/rh/empleados todos 200. Endpoint /api/cotizaciones/{id}/enviar responde sin 500. Frontend Playwright PASS: el botón download-cot-{id} NO descarga directo, abre modal membrete-modal con dos tarjetas (DEYMA amber 'DESARROLLO Y MANTENIMIENTO' + FRECCIAMD sky 'FRECCIA · CONSTRUCCIÓN INDUSTRIAL'), botón membrete-cancel cierra el modal, click en membrete-deyma dispara GET /api/cotizaciones/{id}/pdf?marca=deyma con Authorization header y cierra el modal, idem membrete-frecciamd. Portal cliente sigue hardcodeando marca=deyma sin modal (verificado en código línea 263 ClientePortalPage.jsx). CERO bloqueantes.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v47_pdf_membrete.py",
+    "/app/test_reports/pytest/pytest_v47_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py supera 3186 líneas — se viene arrastrando desde iteraciones previas. Recomendar split por dominio (cotizaciones/clientes/rh/radar) cuando se haga refactor.",
+    "_build_cotizacion_pdf imports reportlab/io/os DENTRO de la función — es un patrón funcional pero un poco anti-DRY si se llama miles de veces. Bajo impacto (es to_thread).",
+    "El observación #6 usa cot.get('validez_dias', 15) — si la cotización fue creada antes de existir ese campo y es None, el default 15 está OK; revisar si campo es opcional en el schema.",
+    "Header image se carga del filesystem cada llamada (sin caché). Para volumen alto convendría precargar bytes a memoria al startup, pero hoy es aceptable.",
+    "ROUNDEDCORNERS en TableStyle es propiedad poco común — verificar que reportlab la respeta en la versión instalada (no rompe el build, sólo puede ignorarse). Cosmético.",
+    "marca_info usa fallback a 'deyma' si marca desconocida, pero ya hay validación previa en el endpoint (400). Defensa en profundidad correcta."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v47_pdf_membrete.py (nuevo)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "director@deyma.mx / Deyma2026! (staff). Cotización existente usada: a29d0dbf-52d5-4fbb-b48c-92bfe6b7465b (DEY-2026-0008)",
+  "seed_data_creation": "Ninguna — se usó cotización existente con items > 0",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "PDF de cotizaciones soporta query marca=deyma|frecciamd (default deyma). Frontend cotizador abre modal antes de descargar; portal cliente descarga directo en deyma. Imágenes header están en /app/backend/assets/. Si se agregan más marcas, registrar en dict marca_info en server.py:_build_cotizacion_pdf y subir header_{marca}.png.",
+  "rca of the issue": "N/A — no se reportaron bugs en esta iteración."
+}

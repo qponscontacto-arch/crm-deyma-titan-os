@@ -25,6 +25,7 @@ export default function CotizadorPage() {
   const [empresas, setEmpresas] = useState([]);
   const [open, setOpen] = useState(false);
   const [seguimientoId, setSeguimientoId] = useState(null);
+  const [pdfCot, setPdfCot] = useState(null); // cot seleccionado para descargar PDF
 
   const load = async () => {
     const [c, e] = await Promise.all([api.get("/cotizaciones"), api.get("/empresas")]);
@@ -61,7 +62,7 @@ export default function CotizadorPage() {
                   <td className="font-mono text-xs text-zinc-500">{new Date(c.created_at).toLocaleDateString("es-MX")}</td>
                   <td className="flex items-center gap-2">
                     <button data-testid={`seguimiento-cot-${c.id}`} onClick={() => setSeguimientoId(c.id)} className="text-amber-400 hover:text-amber-300" title="Panel de Seguimiento"><Eye size={14}/></button>
-                    <button data-testid={`download-cot-${c.id}`} onClick={() => downloadPdf(`/cotizaciones/${c.id}/pdf`, `cotizacion_${c.folio}.pdf`)} className="text-sky-400 hover:text-sky-300" title="Descargar PDF"><Download size={14}/></button>
+                    <button data-testid={`download-cot-${c.id}`} onClick={() => setPdfCot(c)} className="text-sky-400 hover:text-sky-300" title="Descargar PDF"><Download size={14}/></button>
                   </td>
                 </tr>
               ))}
@@ -72,12 +73,74 @@ export default function CotizadorPage() {
 
       <NewCotModal open={open} onClose={() => setOpen(false)} empresas={empresas} onSaved={() => { setOpen(false); load(); }} />
 
+      <DescargarMembreteModal cot={pdfCot} onClose={() => setPdfCot(null)} />
+
       <SeguimientoCotizacionModal
         open={!!seguimientoId}
         cotizacionId={seguimientoId}
         onClose={() => setSeguimientoId(null)}
         onChanged={load}
       />
+    </div>
+  );
+}
+
+function DescargarMembreteModal({ cot, onClose }) {
+  const [busy, setBusy] = useState(false);
+  if (!cot) return null;
+  const descargar = async (marca) => {
+    setBusy(true);
+    try {
+      const suffix = marca === "deyma" ? "DEYMA" : "FRECCIAMD";
+      await downloadPdf(`/cotizaciones/${cot.id}/pdf?marca=${marca}`, `cotizacion_${suffix}_${cot.folio}.pdf`);
+      onClose();
+    } finally { setBusy(false); }
+  };
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur flex items-center justify-center p-4" onClick={onClose} data-testid="membrete-modal">
+      <div className="bg-zinc-950 border border-white/10 max-w-lg w-full p-6 space-y-5" onClick={(e) => e.stopPropagation()}>
+        <div>
+          <div className="label-overline text-amber-400">Seleccionar membrete · {cot.folio}</div>
+          <h2 className="text-2xl font-black mt-1" style={{ fontFamily: "Chivo, sans-serif" }}>¿Con qué logo descargar?</h2>
+          <p className="text-xs text-zinc-400 mt-2">El membrete cambia el logo, la razón social y el footer del PDF.</p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            data-testid="membrete-deyma"
+            disabled={busy}
+            onClick={() => descargar("deyma")}
+            className="border-2 border-white/10 hover:border-amber-500 bg-zinc-900 p-5 transition-all flex flex-col items-center gap-3 text-center group disabled:opacity-50"
+          >
+            <div className="w-14 h-14 bg-amber-500/20 border border-amber-500/40 flex items-center justify-center group-hover:bg-amber-500/30">
+              <span className="text-2xl">🦺</span>
+            </div>
+            <div>
+              <div className="font-bold text-amber-400 text-lg" style={{ fontFamily: "Chivo, sans-serif" }}>DEYMA</div>
+              <div className="text-[10px] text-zinc-500 font-mono mt-1">DESARROLLO Y MANTENIMIENTO</div>
+              <div className="text-[10px] text-zinc-500 font-mono">DEYMA CONSTRUCCIONES S.A. DE C.V.</div>
+            </div>
+          </button>
+
+          <button
+            data-testid="membrete-frecciamd"
+            disabled={busy}
+            onClick={() => descargar("frecciamd")}
+            className="border-2 border-white/10 hover:border-sky-500 bg-zinc-900 p-5 transition-all flex flex-col items-center gap-3 text-center group disabled:opacity-50"
+          >
+            <div className="w-14 h-14 bg-sky-500/20 border border-sky-500/40 flex items-center justify-center group-hover:bg-sky-500/30">
+              <span className="text-2xl">🧭</span>
+            </div>
+            <div>
+              <div className="font-bold text-sky-400 text-lg" style={{ fontFamily: "Chivo, sans-serif" }}>FRECCIAMD</div>
+              <div className="text-[10px] text-zinc-500 font-mono mt-1">FRECCIA · CONSTRUCCIÓN INDUSTRIAL</div>
+              <div className="text-[10px] text-zinc-500 font-mono">FRECCIA MD S.A. DE C.V.</div>
+            </div>
+          </button>
+        </div>
+
+        <button onClick={onClose} disabled={busy} data-testid="membrete-cancel" className="btn-ghost w-full text-xs">Cancelar</button>
+      </div>
     </div>
   );
 }

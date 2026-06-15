@@ -260,7 +260,7 @@ function CotsTab({ cots }) {
                 <td className="p-3 text-right font-mono">{fmtMXN(c.total)}</td>
                 <td className="p-3 text-zinc-500 font-mono">{new Date(c.created_at).toLocaleDateString("es-MX")}</td>
                 <td className="p-3 text-right">
-                  <button onClick={() => downloadPdf(`/cotizaciones/${c.id}/pdf`, `${c.folio}.pdf`)} data-testid={`cot-pdf-${c.id}`} className="text-amber-400 hover:text-amber-300 inline-flex items-center gap-1"><Download size={12} /> PDF</button>
+                  <button onClick={() => downloadPdf(`/cotizaciones/${c.id}/pdf?marca=deyma`, `${c.folio}.pdf`)} data-testid={`cot-pdf-${c.id}`} className="text-amber-400 hover:text-amber-300 inline-flex items-center gap-1"><Download size={12} /> PDF</button>
                 </td>
               </tr>
             ))}

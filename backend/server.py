@@ -1281,215 +1281,244 @@ async def delete_documento(did: str, user: dict = Depends(get_current_user)):
 # V2: PDF de Cotización (ReportLab con membrete DEYMA)
 # ----------------------------------------------------------------------------
 @api.get("/cotizaciones/{cid}/pdf")
-async def cotizacion_pdf(cid: str, user: dict = Depends(get_current_user)):
+async def cotizacion_pdf(cid: str, marca: str = "deyma", user: dict = Depends(get_current_user)):
+    if marca not in ("deyma", "frecciamd"):
+        raise HTTPException(status_code=400, detail="marca debe ser 'deyma' o 'frecciamd'")
     cot = await db.cotizaciones.find_one({"id": cid}, {"_id": 0})
     if not cot:
         raise HTTPException(status_code=404, detail="Cotización no encontrada")
     emp = await db.empresas.find_one({"id": cot["empresa_id"]}, {"_id": 0}) or {}
     cont = await db.contactos.find_one({"empresa_id": cot["empresa_id"]}, {"_id": 0}) or {}
-    pdf_bytes = await asyncio.to_thread(_build_cotizacion_pdf, cot, emp, cont, user)
+    pdf_bytes = await asyncio.to_thread(_build_cotizacion_pdf, cot, emp, cont, user, marca)
     import io
+    suffix = "DEYMA" if marca == "deyma" else "FRECCIAMD"
     return StreamingResponse(
         io.BytesIO(pdf_bytes),
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="cotizacion_{cot["folio"]}.pdf"'},
+        headers={"Content-Disposition": f'attachment; filename="cotizacion_{suffix}_{cot["folio"]}.pdf"'},
     )
 
 
-def _build_cotizacion_pdf(cot: dict, emp: dict, cont: dict, user: dict) -> bytes:
+def _build_cotizacion_pdf(cot: dict, emp: dict, cont: dict, user: dict, marca: str = "deyma") -> bytes:
+    """Genera el PDF de cotización con membrete corporativo DEYMA o FRECCIAMD.
+    Replica el diseño del template oficial: barra superior con logo + curvas naranja/azul,
+    datos del cliente en cápsulas azules, tabla de conceptos y observaciones generales 1-10."""
     from reportlab.lib.pagesizes import LETTER
     from reportlab.lib.units import cm
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_RIGHT
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.enums import TA_RIGHT, TA_LEFT, TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+    from reportlab.lib.utils import ImageReader
     import io as _io
+    import os as _os
 
-    AMBER = colors.HexColor("#f59e0b")
-    DARK = colors.HexColor("#18181b")
-    GRAY = colors.HexColor("#71717a")
-    LIGHT = colors.HexColor("#f4f4f5")
+    # Paleta corporativa extraída del template oficial
+    NAVY = colors.HexColor("#0F1F4D")
+    ORANGE = colors.HexColor("#F37021")
+    DARK = colors.HexColor("#1A1A1A")
+    GRAY = colors.HexColor("#6B7280")
+    LIGHT = colors.HexColor("#F5F5F5")
+
+    # Datos fiscales por marca
+    marca_info = {
+        "deyma": {
+            "razon": "DEYMA CONSTRUCCIONES S.A. DE C.V.",
+            "tagline": "DESARROLLO Y MANTENIMIENTO",
+            "asset": "header_deyma.png",
+            "footer": "DEYMA Construcciones · Soluciones industriales en concreto y mantenimiento",
+        },
+        "frecciamd": {
+            "razon": "FRECCIA MD S.A. DE C.V.",
+            "tagline": "FRECCIA · CONSTRUCCIÓN INDUSTRIAL",
+            "asset": "header_frecciamd.png",
+            "footer": "FRECCIA MD · Soluciones industriales especializadas",
+        },
+    }
+    mi = marca_info.get(marca, marca_info["deyma"])
+    header_path = _os.path.join(_os.path.dirname(__file__), "assets", mi["asset"])
 
     buf = _io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=LETTER,
-                            leftMargin=1.8 * cm, rightMargin=1.8 * cm,
-                            topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+                            leftMargin=1.4 * cm, rightMargin=1.4 * cm,
+                            topMargin=0.6 * cm, bottomMargin=1.5 * cm,
                             title=f"Cotización {cot['folio']}")
     styles = getSampleStyleSheet()
     body = ParagraphStyle("body", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=12, textColor=DARK)
     body_sm = ParagraphStyle("bs", parent=body, fontSize=8, leading=10)
+    label_white = ParagraphStyle("lw", parent=body, fontSize=9, textColor=colors.white, fontName="Helvetica-Bold", alignment=TA_CENTER)
+    value = ParagraphStyle("vw", parent=body, fontSize=10, textColor=DARK, leading=12)
 
     story = []
 
-    # Header / membrete
-    header_data = [
-        [
-            Paragraph(
-                '<font color="#f59e0b" size="22"><b>DEYMA</b></font>'
-                '<font color="#71717a" size="22"> · RADAR</font>'
-                '<br/><font color="#71717a" size="7">SISTEMA DE INTELIGENCIA COMERCIAL · CONSTRUCCIÓN INDUSTRIAL</font>',
-                body,
-            ),
-            Paragraph(
-                f'<b>COTIZACIÓN</b><br/>'
-                f'<font color="#f59e0b"><b>{cot["folio"]}</b></font><br/>'
-                f'<font size="7" color="#71717a">FECHA: {datetime.fromisoformat(cot["created_at"].replace("Z","+00:00")).strftime("%d/%m/%Y") if isinstance(cot["created_at"], str) else ""}</font>',
-                ParagraphStyle("hd", parent=body, alignment=TA_RIGHT, fontSize=10, leading=12),
-            ),
-        ]
-    ]
-    h_tbl = Table(header_data, colWidths=[11 * cm, 6 * cm])
-    h_tbl.setStyle(TableStyle([
-        ("LINEBELOW", (0, 0), (-1, -1), 1.5, AMBER),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
-    ]))
-    story.append(h_tbl)
-    story.append(Spacer(1, 0.6 * cm))
+    # ========== 1. Header con logo (imagen del template oficial) ==========
+    if _os.path.exists(header_path):
+        # ancho útil: 21.59cm - 2*1.4cm = 18.79cm; aspect ratio del header (~1600x226 = 7.08)
+        img_w = 18.79 * cm
+        img_h = img_w / (1600 / 226)
+        story.append(RLImage(header_path, width=img_w, height=img_h))
+    story.append(Spacer(1, 0.2 * cm))
 
-    # Cliente
-    cli_data = [[
-        Paragraph(
-            '<font color="#71717a"><b>CLIENTE</b></font><br/>'
-            f'<b>{emp.get("nombre","—")}</b><br/>'
-            f'{emp.get("ciudad","")}, {emp.get("estado","")}<br/>'
-            f'<font color="#71717a">{emp.get("rfc","RFC s/inf.")}</font>',
-            body,
-        ),
-        Paragraph(
-            '<font color="#71717a"><b>CONTACTO</b></font><br/>'
-            f'<b>{cont.get("nombre","—")}</b><br/>'
-            f'{cont.get("puesto","")}<br/>'
-            f'<font color="#71717a">{cont.get("email","")} · {cont.get("telefono","")}</font>',
-            body,
-        ),
-        Paragraph(
-            '<font color="#71717a"><b>PROYECTO</b></font><br/>'
-            f'<b>{cot["proyecto_titulo"]}</b><br/>'
-            f'<font color="#71717a">Validez: {cot["validez_dias"]} días</font><br/>'
-            f'<font color="#71717a">Estado: {cot["estado"].upper()}</font>',
-            body,
-        ),
-    ]]
-    cli_tbl = Table(cli_data, colWidths=[5.5 * cm, 5.5 * cm, 6 * cm])
-    cli_tbl.setStyle(TableStyle([
-        ("BOX", (0, 0), (-1, -1), 0.5, GRAY),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 10),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-        ("TOPPADDING", (0, 0), (-1, -1), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-    ]))
-    story.append(cli_tbl)
+    # ========== 2. Datos cliente y cotización en cápsulas azules ==========
+    def cap(label, value_txt):
+        return Table(
+            [
+                [Paragraph(label, label_white)],
+                [Paragraph(str(value_txt or "—"), value)],
+            ],
+            colWidths=[None],
+            rowHeights=[0.55 * cm, 0.7 * cm],
+            style=TableStyle([
+                ("BACKGROUND", (0, 0), (0, 0), NAVY),
+                ("BACKGROUND", (0, 1), (0, 1), LIGHT),
+                ("TEXTCOLOR", (0, 0), (0, 0), colors.white),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("BOX", (0, 1), (0, 1), 0.4, colors.HexColor("#D4D4D8")),
+                ("ROUNDEDCORNERS", [4, 4, 0, 0]),
+            ]),
+        )
+
+    fecha_str = ""
+    try:
+        fecha_str = datetime.fromisoformat(cot["created_at"].replace("Z", "+00:00")).strftime("%d/%m/%Y")
+    except Exception:
+        fecha_str = (cot.get("created_at") or "")[:10]
+
+    info_left = [
+        [cap("EMPRESA", emp.get("nombre", "—"))],
+        [Spacer(1, 0.1 * cm)],
+        [cap("ATENCIÓN", cont.get("nombre", "—"))],
+        [Spacer(1, 0.1 * cm)],
+        [cap("CORREO", cont.get("email", "—"))],
+        [Spacer(1, 0.1 * cm)],
+        [cap("NÚMERO", cont.get("telefono", "—"))],
+    ]
+    info_right = [
+        [cap("No. DE COT.", cot.get("folio", "—"))],
+        [Spacer(1, 0.1 * cm)],
+        [cap("FECHA", fecha_str)],
+        [Spacer(1, 0.1 * cm)],
+        [cap("CIUDAD", f'{emp.get("ciudad", "")}, {emp.get("estado", "")}'.strip(", ") or "—")],
+        [Spacer(1, 0.1 * cm)],
+        [cap("OBRA", cot.get("proyecto_titulo", "—"))],
+    ]
+    info_tbl = Table(
+        [[Table(info_left, colWidths=[8.8 * cm]), Table(info_right, colWidths=[8.8 * cm])]],
+        colWidths=[9 * cm, 9 * cm],
+        style=TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0)]),
+    )
+    story.append(info_tbl)
     story.append(Spacer(1, 0.5 * cm))
 
-    # Items table
-    items_data = [["#", "DESCRIPCIÓN", "CANT.", "UNIDAD", "P. UNIT.", "SUBTOTAL"]]
+    # ========== 3. Tabla de conceptos ==========
+    items_data = [["CÓDIGO", "CONCEPTO", "UNIDAD", "CANTIDAD", "P. UNITARIO", "IMPORTE"]]
     for i, it in enumerate(cot["items"], 1):
         subt = it["cantidad"] * it["precio_unitario"]
         items_data.append([
-            str(i),
+            f"{i:03d}",
             Paragraph(it["descripcion"], body_sm),
-            f"{it['cantidad']:,.2f}",
             it["unidad"],
+            f"{it['cantidad']:,.2f}",
             f"${it['precio_unitario']:,.2f}",
             f"${subt:,.2f}",
         ])
-    it_tbl = Table(items_data, colWidths=[0.8 * cm, 8.5 * cm, 2 * cm, 1.5 * cm, 2 * cm, 2.5 * cm])
+    it_tbl = Table(items_data, colWidths=[1.5 * cm, 7.5 * cm, 1.8 * cm, 2 * cm, 2.7 * cm, 3 * cm])
     it_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), DARK),
+        ("BACKGROUND", (0, 0), (-1, 0), NAVY),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
         ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
-        ("ALIGN", (3, 0), (3, -1), "CENTER"),
-        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("ALIGN", (2, 0), (2, -1), "CENTER"),
+        ("FONTSIZE", (0, 1), (-1, -1), 8.5),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT]),
-        ("LINEBELOW", (0, 0), (-1, 0), 1, AMBER),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LINEBELOW", (0, 0), (-1, 0), 1.5, ORANGE),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D4D4D8")),
     ]))
     story.append(it_tbl)
-    story.append(Spacer(1, 0.4 * cm))
+    story.append(Spacer(1, 0.3 * cm))
 
-    # Totals
+    # ========== 4. Totales ==========
     totals_data = [
-        ["", "SUBTOTAL", f"${cot['subtotal']:,.2f}"],
-        ["", f"IVA ({cot['iva_pct']}%)", f"${cot['iva_monto']:,.2f}"],
-        ["", "TOTAL MXN", f"${cot['total']:,.2f}"],
+        ["", "SUB-TOTAL", f"${cot['subtotal']:,.2f}"],
+        ["", f"IVA {cot['iva_pct']}%", f"${cot['iva_monto']:,.2f}"],
+        ["", "TOTAL", f"${cot['total']:,.2f}"],
     ]
-    tot_tbl = Table(totals_data, colWidths=[10 * cm, 4 * cm, 3.3 * cm])
+    tot_tbl = Table(totals_data, colWidths=[12 * cm, 3.5 * cm, 3 * cm])
     tot_tbl.setStyle(TableStyle([
         ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
         ("FONTNAME", (1, 0), (-1, -1), "Helvetica-Bold"),
         ("FONTSIZE", (1, 0), (-1, 1), 9),
-        ("TEXTCOLOR", (1, 0), (-1, 1), GRAY),
+        ("TEXTCOLOR", (1, 0), (-1, 1), DARK),
+        ("BACKGROUND", (1, 2), (-1, 2), NAVY),
+        ("TEXTCOLOR", (1, 2), (-1, 2), colors.white),
         ("FONTSIZE", (1, 2), (-1, 2), 13),
-        ("TEXTCOLOR", (1, 2), (-1, 2), AMBER),
-        ("LINEABOVE", (1, 2), (-1, 2), 1, AMBER),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("LINEBELOW", (1, 0), (-1, 1), 0.4, colors.HexColor("#D4D4D8")),
     ]))
     story.append(tot_tbl)
-    story.append(Spacer(1, 0.7 * cm))
+    story.append(Spacer(1, 0.4 * cm))
 
-    # Notas
+    # ========== 5. Observaciones generales (10 puntos del template oficial) ==========
+    obs = [
+        "Para iniciar el trabajo requeriremos orden de compra.",
+        "El tiempo de entrega será de (3 días) naturales.",
+        "Términos de pago de acuerdo a lo acordado previo a alta de clientes en nuestro CRM.",
+        "Nos reservamos el derecho de dominio sobre los trabajos y materiales reflejados en esta cotización hasta no ser liquidados en su totalidad.",
+        "No nos hacemos responsables por daños causados en instalaciones ocultas.",
+        f"Vigencia de cotización en {cot.get('validez_dias', 15)} días.",
+        "La garantía de equipos y componentes es la misma que da el proveedor (15 días) en equipos. La garantía de calidad en los materiales y mano de obra es de (3 meses) por algún defecto; nos comprometemos a repararlo a la brevedad. No nos hacemos responsables por el mal uso de los mismos.",
+        "No se hacen modificaciones a la obra sin un anexo y orden de compra.",
+        "Si la obra termina y no hubo retroalimentación de la parte encargada de mantenimiento o personal inscrito en nuestro portal, se da por hecho que se termina con éxito.",
+        "Es importante la retroalimentación diaria con el equipo técnico por parte de ambas empresas.",
+    ]
+    story.append(Paragraph('<font color="#0F1F4D"><b>Observaciones Generales:</b></font>', body))
+    story.append(Spacer(1, 0.15 * cm))
+    obs_rows = []
+    for i, txt in enumerate(obs, 1):
+        obs_rows.append([
+            Paragraph(f'<font color="#F37021"><b>{i}.</b></font>', body_sm),
+            Paragraph(txt, body_sm),
+        ])
+    obs_tbl = Table(obs_rows, colWidths=[1.0 * cm, 16.8 * cm])
+    obs_tbl.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    story.append(obs_tbl)
+
+    # Notas adicionales del usuario
     if cot.get("notas"):
-        story.append(Paragraph('<font color="#71717a"><b>NOTAS</b></font>', body))
-        story.append(Spacer(1, 0.15 * cm))
+        story.append(Spacer(1, 0.3 * cm))
+        story.append(Paragraph('<font color="#0F1F4D"><b>Notas adicionales:</b></font>', body))
         story.append(Paragraph(cot["notas"], body_sm))
-        story.append(Spacer(1, 0.4 * cm))
 
-    # Condiciones
-    cond_text = (
-        "<b>CONDICIONES COMERCIALES</b><br/>"
-        f"• Vigencia de la cotización: <b>{cot['validez_dias']} días naturales</b> a partir de la fecha de emisión.<br/>"
-        "• Precios en pesos mexicanos (MXN), no incluyen otros impuestos distintos al IVA indicado.<br/>"
-        "• Forma de pago: 50% anticipo, 50% contra entrega (sujeto a negociación).<br/>"
-        "• Tiempo de entrega: a convenir según calendario de obra.<br/>"
-        "• Garantía: pisos industriales 12 meses, mantenimiento 6 meses contra defectos de instalación.<br/>"
-    )
-    story.append(Paragraph(cond_text, body_sm))
-    story.append(Spacer(1, 1.2 * cm))
-
-    # Firma
-    firma_data = [[
-        Paragraph(
-            '<para alignment="center">'
-            '_______________________________<br/>'
-            f'<b>{user.get("name","DEYMA")}</b><br/>'
-            f'<font size="7" color="#71717a">{user.get("email","")}</font><br/>'
-            '<font size="7" color="#71717a">DEYMA CONSTRUCCIONES S.A. DE C.V.</font>'
-            '</para>',
-            body_sm,
-        ),
-        Paragraph(
-            '<para alignment="center">'
-            '_______________________________<br/>'
-            f'<b>{cont.get("nombre","Cliente")}</b><br/>'
-            f'<font size="7" color="#71717a">{emp.get("nombre","")}</font><br/>'
-            '<font size="7" color="#71717a">ACEPTACIÓN DE COTIZACIÓN</font>'
-            '</para>',
-            body_sm,
-        ),
-    ]]
-    f_tbl = Table(firma_data, colWidths=[8.5 * cm, 8.5 * cm])
-    f_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
-    story.append(f_tbl)
-
-    # Footer
+    # ========== 6. Footer ==========
     def _footer(canvas, _doc):
         canvas.saveState()
+        # Línea decorativa naranja + navy
+        canvas.setStrokeColor(ORANGE)
+        canvas.setLineWidth(1.2)
+        canvas.line(1.4 * cm, 1.3 * cm, 20.2 * cm, 1.3 * cm)
+        canvas.setFont("Helvetica-Bold", 7)
+        canvas.setFillColor(NAVY)
+        canvas.drawString(1.4 * cm, 0.95 * cm, mi["razon"])
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(GRAY)
-        canvas.drawString(1.8 * cm, 1 * cm, "DEYMA · RADAR  ·  Sistema de Inteligencia Comercial")
-        canvas.drawRightString(20 * cm, 1 * cm, f"Folio {cot['folio']}  ·  Página {_doc.page}")
-        canvas.setStrokeColor(AMBER)
-        canvas.setLineWidth(1.2)
-        canvas.line(1.8 * cm, 1.3 * cm, 20 * cm, 1.3 * cm)
+        canvas.drawString(1.4 * cm, 0.65 * cm, mi["footer"])
+        canvas.drawRightString(20.2 * cm, 0.65 * cm, f"Folio {cot['folio']}  ·  Página {_doc.page}")
         canvas.restoreState()
 
     doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
