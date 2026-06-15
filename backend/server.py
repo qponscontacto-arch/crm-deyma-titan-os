@@ -226,7 +226,14 @@ class CotizacionItem(BaseModel):
 
 
 class CotizacionIn(BaseModel):
-    empresa_id: str
+    empresa_id: Optional[str] = None
+    # Cliente manual (cuando no existe en CRM): al menos cliente_nombre es requerido si empresa_id es None
+    cliente_nombre: Optional[str] = None
+    cliente_rfc: Optional[str] = None
+    cliente_ciudad: Optional[str] = None
+    cliente_atencion: Optional[str] = None
+    cliente_email: Optional[str] = None
+    cliente_telefono: Optional[str] = None
     proyecto_titulo: str
     items: List[CotizacionItem]
     iva_pct: float = 16.0
@@ -237,7 +244,13 @@ class CotizacionIn(BaseModel):
 class Cotizacion(BaseModel):
     id: str
     folio: str
-    empresa_id: str
+    empresa_id: Optional[str] = None
+    cliente_nombre: Optional[str] = None
+    cliente_rfc: Optional[str] = None
+    cliente_ciudad: Optional[str] = None
+    cliente_atencion: Optional[str] = None
+    cliente_email: Optional[str] = None
+    cliente_telefono: Optional[str] = None
     proyecto_titulo: str
     items: List[CotizacionItem]
     subtotal: float
@@ -601,6 +614,8 @@ async def list_cotizaciones(user: dict = Depends(get_current_user)):
 
 @api.post("/cotizaciones", response_model=Cotizacion)
 async def create_cotizacion(body: CotizacionIn, user: dict = Depends(get_current_user)):
+    if not body.empresa_id and not (body.cliente_nombre and body.cliente_nombre.strip()):
+        raise HTTPException(status_code=400, detail="Debes seleccionar una empresa del CRM o capturar el nombre del cliente manual.")
     subtotal, iva, total = _cot_totals(body.items, body.iva_pct)
     count = await db.cotizaciones.count_documents({})
     folio = f"DEY-{datetime.now().year}-{count+1:04d}"
@@ -608,6 +623,12 @@ async def create_cotizacion(body: CotizacionIn, user: dict = Depends(get_current
         "id": new_id(),
         "folio": folio,
         "empresa_id": body.empresa_id,
+        "cliente_nombre": (body.cliente_nombre or "").strip() or None,
+        "cliente_rfc": (body.cliente_rfc or "").strip() or None,
+        "cliente_ciudad": (body.cliente_ciudad or "").strip() or None,
+        "cliente_atencion": (body.cliente_atencion or "").strip() or None,
+        "cliente_email": (body.cliente_email or "").strip() or None,
+        "cliente_telefono": (body.cliente_telefono or "").strip() or None,
         "proyecto_titulo": body.proyecto_titulo,
         "items": [it.model_dump() for it in body.items],
         "subtotal": subtotal,
@@ -1287,8 +1308,7 @@ async def cotizacion_pdf(cid: str, marca: str = "deyma", user: dict = Depends(ge
     cot = await db.cotizaciones.find_one({"id": cid}, {"_id": 0})
     if not cot:
         raise HTTPException(status_code=404, detail="Cotización no encontrada")
-    emp = await db.empresas.find_one({"id": cot["empresa_id"]}, {"_id": 0}) or {}
-    cont = await db.contactos.find_one({"empresa_id": cot["empresa_id"]}, {"_id": 0}) or {}
+    emp, cont = await _cot_cliente_data(cot)
     pdf_bytes = await asyncio.to_thread(_build_cotizacion_pdf, cot, emp, cont, user, marca)
     import io
     suffix = "DEYMA" if marca == "deyma" else "FRECCIAMD"
@@ -1297,6 +1317,42 @@ async def cotizacion_pdf(cid: str, marca: str = "deyma", user: dict = Depends(ge
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="cotizacion_{suffix}_{cot["folio"]}.pdf"'},
     )
+
+
+async def _cot_cliente_data(cot: dict) -> Tuple[dict, dict]:
+    """Resuelve los datos de empresa+contacto para PDF/email.
+    Si la cotización tiene `empresa_id`, los toma del CRM.
+    Si es un cliente manual (sólo `cliente_nombre` y opcionales), construye el dict in-memory.
+    """
+    if cot.get("empresa_id"):
+        emp = await db.empresas.find_one({"id": cot["empresa_id"]}, {"_id": 0}) or {}
+        cont = await db.contactos.find_one({"empresa_id": cot["empresa_id"]}, {"_id": 0}) or {}
+        # Si además se capturaron datos manuales en la cotización, prevalecen los manuales
+        if cot.get("cliente_atencion") or cot.get("cliente_email") or cot.get("cliente_telefono"):
+            cont = {
+                "nombre": cot.get("cliente_atencion") or cont.get("nombre", ""),
+                "email": cot.get("cliente_email") or cont.get("email", ""),
+                "telefono": cot.get("cliente_telefono") or cont.get("telefono", ""),
+            }
+        return emp, cont
+    # Cliente manual: ciudad puede venir como "Querétaro, Qro" o solo "Querétaro"
+    ciudad_raw = (cot.get("cliente_ciudad") or "").strip()
+    if "," in ciudad_raw:
+        ciudad, estado = [x.strip() for x in ciudad_raw.split(",", 1)]
+    else:
+        ciudad, estado = ciudad_raw, ""
+    emp = {
+        "nombre": cot.get("cliente_nombre") or "Cliente",
+        "rfc": cot.get("cliente_rfc") or "",
+        "ciudad": ciudad,
+        "estado": estado,
+    }
+    cont = {
+        "nombre": cot.get("cliente_atencion") or "",
+        "email": cot.get("cliente_email") or "",
+        "telefono": cot.get("cliente_telefono") or "",
+    }
+    return emp, cont
 
 
 def _build_cotizacion_pdf(cot: dict, emp: dict, cont: dict, user: dict, marca: str = "deyma") -> bytes:
@@ -1647,8 +1703,7 @@ async def get_email_template(cid: str, user: dict = Depends(get_current_user)):
     cot = await db.cotizaciones.find_one({"id": cid}, {"_id": 0})
     if not cot:
         raise HTTPException(status_code=404, detail="Cotización no encontrada")
-    emp = await db.empresas.find_one({"id": cot["empresa_id"]}, {"_id": 0}) or {}
-    cont = await db.contactos.find_one({"empresa_id": cot["empresa_id"]}, {"_id": 0}) or {}
+    emp, cont = await _cot_cliente_data(cot)
     subject = f"Cotización {cot['folio']} — {cot['proyecto_titulo']} · DEYMA"
     saludo = (cont.get("nombre") or emp.get("nombre") or "Estimado(a) cliente").split()[0]
     items_html = "".join(
@@ -1707,8 +1762,7 @@ async def aprobar_enviar(cid: str, body: AprobarEnviarIn,
     # Preparar adjuntos: PDF cotización
     attachments = []
     if body.adjuntar_pdf:
-        emp = await db.empresas.find_one({"id": cot["empresa_id"]}, {"_id": 0}) or {}
-        cont = await db.contactos.find_one({"empresa_id": cot["empresa_id"]}, {"_id": 0}) or {}
+        emp, cont = await _cot_cliente_data(cot)
         pdf_bytes = await asyncio.to_thread(_build_cotizacion_pdf, cot, emp, cont, user)
         import base64 as _b64
         attachments.append({
@@ -1815,8 +1869,7 @@ async def get_seguimiento(cid: str, user: dict = Depends(get_current_user)):
     cot = await db.cotizaciones.find_one({"id": cid}, {"_id": 0})
     if not cot:
         raise HTTPException(status_code=404, detail="Cotización no encontrada")
-    emp = await db.empresas.find_one({"id": cot["empresa_id"]}, {"_id": 0}) or {}
-    cont = await db.contactos.find_one({"empresa_id": cot["empresa_id"]}, {"_id": 0}) or {}
+    emp, cont = await _cot_cliente_data(cot)
     return {
         "cotizacion": cot,
         "empresa": emp,
