@@ -321,6 +321,20 @@ Wireframes implementados en código (no Figma) en:
 - ✅ **Frontend `/scraper`**: 3 action cards (Ejecutar / Calificar / Enviar) + 4 stats cards (Total radar / Detectados IA / Twilio status / Errores) + panel del último resumen matutino con top 5 + log de ejecuciones.
 - ✅ Testing iter 3: 14/14 backend V3 (100%) + 100% frontend crítico. Bug NaN del mapa **resuelto**.
 
+## 17. V4.7 PDF Cotización · Membrete dual (DEYMA / FRECCIAMD) (15-Feb-2026)
+### Implementado y probado (iteration_7.json · 13/13 backend + 100% frontend)
+- ✅ El PDF de cotización ahora replica el diseño del template oficial subido por el usuario: colores corporativos NAVY `#0F1F4D` + ORANGE `#F37021`, datos del cliente en cápsulas azules, tabla NAVY+ORANGE con columnas CÓDIGO/CONCEPTO/UNIDAD/CANTIDAD/P.UNITARIO/IMPORTE, TOTAL prominente en navy y las **10 observaciones generales exactas** del template oficial.
+- ✅ **Membrete dual seleccionable**: el endpoint `GET /api/cotizaciones/{cid}/pdf?marca=deyma|frecciamd` (default deyma) embebe la imagen del header oficial correspondiente desde `/app/backend/assets/header_{marca}.png` (recortados del PDF "COTIZACIÓN DEYMA editable.pdf").
+- ✅ Footer dinámico con razón social por marca: `DEYMA CONSTRUCCIONES S.A. DE C.V.` o `FRECCIA MD S.A. DE C.V.`
+- ✅ Frontend `/cotizador`: el botón "Descargar PDF" abre un **modal de selección** (data-testid `membrete-modal`) con dos tarjetas grandes para elegir entre DEYMA (amber/casco) o FRECCIAMD (sky/brújula). El portal cliente sigue descargando directo en marca=deyma.
+- ✅ Validación: `marca='otra'` devuelve 400 con detail claro.
+- ✅ Test backend: `/app/backend/tests/test_v47_pdf_membrete.py`.
+
+### Endpoints modificados
+- `GET /api/cotizaciones/{cid}/pdf` ahora acepta `?marca=deyma|frecciamd` (default deyma)
+- Filename de descarga: `cotizacion_{DEYMA|FRECCIAMD}_{folio}.pdf`
+
+
 ## 16. V4.5 RH · Personal Contratado (15-Feb-2026)
 ### Implementado y probado (iteration_6.json · 28/28 backend + 8/8 frontend)
 - ✅ Nuevo módulo `/admin/rh` accesible SOLO para director y socio (RBAC backend + frontend con item de sidebar condicional). Comercial/operaciones reciben 403 / pantalla `rh-denied`.
