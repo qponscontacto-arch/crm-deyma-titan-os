@@ -321,6 +321,30 @@ Wireframes implementados en código (no Figma) en:
 - ✅ **Frontend `/scraper`**: 3 action cards (Ejecutar / Calificar / Enviar) + 4 stats cards (Total radar / Detectados IA / Twilio status / Errores) + panel del último resumen matutino con top 5 + log de ejecuciones.
 - ✅ Testing iter 3: 14/14 backend V3 (100%) + 100% frontend crítico. Bug NaN del mapa **resuelto**.
 
+## 16. V4.5 RH · Personal Contratado (15-Feb-2026)
+### Implementado y probado (iteration_6.json · 28/28 backend + 8/8 frontend)
+- ✅ Nuevo módulo `/admin/rh` accesible SOLO para director y socio (RBAC backend + frontend con item de sidebar condicional). Comercial/operaciones reciben 403 / pantalla `rh-denied`.
+- ✅ CRUD de empleados con campos: nombre, RFC, CURP, NSS, puesto, departamento (6 opciones fijas), fecha_ingreso, salario_diario+mensual+integrado, contacto emergencia, etc. Listado con filtros (status, depto, búsqueda libre).
+- ✅ **Cálculo de prestaciones LFT 2023** (`_calcular_prestaciones`): tabla oficial de vacaciones por antigüedad (12/14/16/18/20 → 22 → 24 → 26 → 28 → 30 → 32), aguinaldo, prima vacacional, próximo aniversario.
+- ✅ **6 categorías de documentos** subidos a GridFS: general, contrato, renuncia, amonestación, certificado médico, DC-3 STPS (con tema/instructor/vigencia). Bucket compartido `cliente_files`.
+- ✅ **Registro de vacaciones tomadas** (programadas/gozadas/canceladas) con balance gozadas/pendientes calculado dinámico.
+- ✅ **Expediente PDF descargable** (ReportLab) con 2 páginas: datos personales+laborales+prestaciones (página 1) y tabla de documentos + historial de vacaciones (página 2). Marca DEYMA + folio EXP-XXXX + footer "CONFIDENCIAL".
+- ✅ Endpoint `/api/rh/alertas` para próximos aniversarios y documentos con vigencia próxima (preparado para integrar al dashboard en futuro).
+- ✅ Tests: `/app/backend/tests/test_v45_rh.py` (28 casos parametrizados LFT).
+
+### Endpoints nuevos
+- `POST/GET /api/rh/empleados`, `GET/PATCH/DELETE /api/rh/empleados/{eid}`
+- `POST/GET-via-detalle /api/rh/empleados/{eid}/documentos` · `GET/DELETE /api/rh/empleados/{eid}/documentos/{doc_id}`
+- `POST/DELETE /api/rh/empleados/{eid}/vacaciones[/{vid}]`
+- `GET /api/rh/empleados/{eid}/expediente` (PDF)
+- `GET /api/rh/alertas`
+
+### Edge cases conocidos (no bloqueantes — backlog V4.5 P2)
+- Bisiesto: empleado con fecha_ingreso 29-feb siempre cae al 28-feb del año siguiente (corregible).
+- 30 años exactos devuelve 30 días (la LFT dice 30+, podría ser 32).
+- PATCH `/api/rh/empleados/{eid}` devuelve `{ok:true}` en lugar del doc actualizado (UX minor).
+
+
 ### Pendiente backlog (Next Action Items)
 - **V4 P1 entregado HOY** ✅ Portal de Alta de Clientes completo (ver sección 15)
 - **V3 P2**: Scraper REAL de Compranet (cuando el sitio esté accesible desde el container o pasando por proxy). Hoy es 100% sintético vía GPT-5.2.
