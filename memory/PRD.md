@@ -322,12 +322,31 @@ Wireframes implementados en código (no Figma) en:
 - ✅ Testing iter 3: 14/14 backend V3 (100%) + 100% frontend crítico. Bug NaN del mapa **resuelto**.
 
 ### Pendiente backlog (Next Action Items)
+- **V4 P1 entregado HOY** ✅ Portal de Alta de Clientes completo (ver sección 15)
 - **V3 P2**: Scraper REAL de Compranet (cuando el sitio esté accesible desde el container o pasando por proxy). Hoy es 100% sintético vía GPT-5.2.
-- **V3 P2**: Refactor `server.py` (ahora 1790 líneas) → routers/services modules
+- **V3 P2**: Refactor `server.py` (ahora 2,651 líneas) → routers/services modules — URGENTE antes de V5
 - **V3 P2**: Exponer `_source` en `/api/radar` para que el frontend pueda filtrar items auto-scraped vs manuales
 - **V3 P2**: Activar Twilio real (llenar las 4 env vars TWILIO_*)
 - **V2 P2 pendiente**: Recordatorios por correo de tareas vencidas (SendGrid/Resend); Storage real de documentos (Cloudinary/S3); Logo SVG real DEYMA en PDF
-- **V3**: App móvil PWA, Portal Cliente, Predicción ventas con histórico
-- **V4**: Multi-tenant SaaS
+- **V3**: App móvil PWA, Predicción ventas con histórico
+- **V4 P2**: Endpoint cambio de password cliente; protección por token de los PDFs públicos por id; validación monto OC >= 0; unicidad DFNUM con retry; separar `aprobaciones` y `rechazos` para auditoría limpia
+- **V5**: Multi-tenant SaaS con Stripe billing
+
+## 15. Estado actual de implementación (15-Feb-2026 · V4 P1 — Portal de Alta de Clientes)
+
+### V4 P1 entregada (5ª iteración · HOY)
+- ✅ **Backend portal de alta completo** (15 endpoints `/api/clientes/*` y `/api/clientes-oc/*`): subida multipart con 5 PDFs a GridFS, generación de folio `ALT-YYYY-NNNN`, doble aprobación Director + Socio (cualquier orden), generación de DFNUM `DFNUM-XXXXXX` al completarse las dos firmas, rechazo final con nota auditable, descarga de documentos GridFS, upload/descarga de Órdenes de Compra del cliente, consulta pública de estado por folio o DFNUM.
+- ✅ **Generación de 2 PDFs con ReportLab** (`_build_alta_pdf` modo 'alta' y 'bienvenida') con membrete DEYMA, datos del cliente, contactos, políticas aceptadas y bloque distintivo de DFNUM en el de bienvenida.
+- ✅ **Nuevo rol `socio`** agregado al Literal y al seed idempotente (`socio@deyma.mx / Socio2026!`).
+- ✅ **Frontend público** (sin login): `/alta-cliente` (formulario multi-step de 5 pasos con upload de los 5 PDFs y validación cliente-side), `/consulta-tramite` (consulta de estado por folio o DFNUM).
+- ✅ **Login dual** (`/login`) con tabs **Staff DEYMA** (email+password) y **Cliente DEYMA** (DFNUM+password). `AuthProvider` ahora maneja dos contextos (`user` vs `cliente`) y `localStorage` distingue `deyma_kind=staff|cliente`.
+- ✅ **Portal cliente** (`/cliente`): 3 tabs (Inicio con datos completos, Órdenes de Compra con form de upload + tabla con descarga, Mis cotizaciones por RFC con descarga del PDF). Auto-descarga el PDF de Bienvenida al primer login (controlado por `localStorage[welcome_pdf_${DFNUM}]`).
+- ✅ **Panel admin de alta** (`/admin/clientes`, visible sólo para director/socio/comercial): tabla con filtros por estado, modal de detalle con descarga de los 5 documentos, ver políticas aceptadas, ver aprobaciones registradas, botones aprobar/rechazar con nota (sólo director y socio pueden decidir; comercial sólo lee).
+- ✅ **Endpoint nuevo** `GET /api/clientes/me/cotizaciones` que liga cotizaciones existentes con el RFC del cliente autenticado.
+- ✅ Testing iter 5: **35/35 backend** (100%) en `/app/backend/tests/test_v4_clientes.py` + frontend Playwright 100%. Sin issues bloqueantes ni regresiones.
+
+### Notas técnicas
+- Se evitó shadowing de rutas usando prefijo `/clientes-oc` para Órdenes de Compra (en lugar de `/clientes/ordenes-compra`) para no chocar con `/clientes/{cid}`.
+- Documentación de PDFs públicos por UUID identificada como riesgo de seguridad — pendiente endurecer en V4 P2.
 
 ## 14. Estado actual de implementación (12-Jun-2026 · V3 P1)
