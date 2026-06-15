@@ -13,11 +13,11 @@ from typing import List, Optional, Literal
 
 import bcrypt
 import jwt
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
 from pydantic import BaseModel, Field, EmailStr, ConfigDict, field_validator
 
 # ----------------------------------------------------------------------------
@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, EmailStr, ConfigDict, field_validator
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
+gridfs_bucket = AsyncIOMotorGridFSBucket(db, bucket_name="cliente_files")
 
 app = FastAPI(title="DEYMA RADAR API", version="1.0.0")
 api = APIRouter(prefix="/api")
@@ -1791,6 +1792,556 @@ async def get_seguimiento(cid: str, user: dict = Depends(get_current_user)):
         "sendgrid_enabled": SENDGRID_ENABLED,
         "sendgrid_from": SENDGRID_FROM_EMAIL or None,
     }
+
+
+# ----------------------------------------------------------------------------
+# V4: Portal de Alta de Clientes (público + flujo aprobación Director y Socio)
+# ----------------------------------------------------------------------------
+def _gen_dfnum() -> str:
+    import random
+    return f"DFNUM-{random.randint(100000, 999999)}"
+
+
+def _gen_folio_alta(seq: int) -> str:
+    return f"ALT-{datetime.now().year}-{seq:04d}"
+
+
+async def get_current_cliente(creds: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> dict:
+    if not creds or not creds.credentials:
+        raise HTTPException(status_code=401, detail="No autenticado")
+    try:
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGO])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expirado")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Token inválido")
+    if payload.get("type") != "client":
+        raise HTTPException(status_code=403, detail="Token no es de cliente")
+    cli = await db.clientes_alta.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+    if not cli:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    return cli
+
+
+def create_client_token(client_id: str, dfnum: str) -> str:
+    return jwt.encode({
+        "sub": client_id, "dfnum": dfnum, "type": "client",
+        "exp": now_utc() + timedelta(hours=12),
+    }, JWT_SECRET, algorithm=JWT_ALGO)
+
+
+@api.post("/clientes/alta")
+async def alta_cliente(
+    # Datos generales
+    razon_social: str = Form(...),
+    rfc: str = Form(...),
+    domicilio_fiscal: str = Form(...),
+    domicilio_planta: str = Form(""),
+    # Login del cliente
+    email: EmailStr = Form(...),
+    password: str = Form(..., min_length=6),
+    # Contactos
+    contacto_tecnico_nombre: str = Form(...),
+    contacto_tecnico_tel: str = Form(...),
+    contacto_tecnico_correo: EmailStr = Form(...),
+    contacto_compras_nombre: str = Form(...),
+    contacto_compras_tel: str = Form(...),
+    contacto_compras_correo: EmailStr = Form(...),
+    contacto_cxp_nombre: str = Form(...),
+    contacto_cxp_tel: str = Form(...),
+    contacto_cxp_correo: EmailStr = Form(...),
+    # Políticas (aceptación)
+    politica_validacion_tecnica: bool = Form(...),
+    politica_firma_actas: bool = Form(...),
+    politica_separacion_errores: bool = Form(...),
+    politica_ordenes_cambio: bool = Form(...),
+    politica_cero_fianzas: bool = Form(...),
+    # Financieras
+    fin_recepcion_oc: bool = Form(...),
+    fin_anticipo: bool = Form(...),
+    fin_dia_1: bool = Form(...),
+    # Firmas (texto)
+    firma_representante_nombre: str = Form(...),
+    firma_representante_sello: str = Form(""),  # opcional
+    firma_tecnico_nombre: str = Form(...),
+    firma_tecnico_area: str = Form(""),
+    # Archivos (PDFs)
+    csf: UploadFile = File(...),  # Constancia Situación Fiscal
+    acta_constitutiva: UploadFile = File(...),
+    poder_representante: UploadFile = File(...),
+    ine_representante: UploadFile = File(...),
+    comprobante_domicilio: UploadFile = File(...),
+):
+    # Validar duplicados por RFC o email
+    if await db.clientes_alta.find_one({"rfc": rfc.upper()}):
+        raise HTTPException(status_code=400, detail=f"Ya existe una solicitud con el RFC {rfc}")
+    if await db.clientes_alta.find_one({"email": email.lower()}):
+        raise HTTPException(status_code=400, detail=f"Ya existe una solicitud con el correo {email}")
+
+    # Subir archivos a GridFS
+    async def _upload(f: UploadFile, doc_type: str) -> dict:
+        contents = await f.read()
+        max_size = 10 * 1024 * 1024  # 10 MB por archivo
+        if len(contents) > max_size:
+            raise HTTPException(status_code=400, detail=f"{doc_type} excede 10 MB")
+        if not f.content_type or "pdf" not in f.content_type.lower():
+            # permitir image/* también para INE
+            if not (f.content_type and "image" in f.content_type.lower()):
+                raise HTTPException(status_code=400, detail=f"{doc_type} debe ser PDF (o imagen para INE)")
+        fid = await gridfs_bucket.upload_from_stream(
+            f.filename or doc_type,
+            contents,
+            metadata={"doc_type": doc_type, "content_type": f.content_type, "uploaded_at": iso(now_utc())},
+        )
+        return {"file_id": str(fid), "filename": f.filename, "content_type": f.content_type, "size": len(contents)}
+
+    docs = {
+        "csf": await _upload(csf, "csf"),
+        "acta": await _upload(acta_constitutiva, "acta"),
+        "poder": await _upload(poder_representante, "poder"),
+        "ine": await _upload(ine_representante, "ine"),
+        "comprobante": await _upload(comprobante_domicilio, "comprobante"),
+    }
+
+    seq = await db.clientes_alta.count_documents({}) + 1
+    folio = _gen_folio_alta(seq)
+    cliente_id = new_id()
+    doc = {
+        "id": cliente_id,
+        "folio_registro": folio,
+        "dfnum": None,  # se asigna al aprobarse
+        "estado": "pendiente",
+        "email": email.lower(),
+        "password_hash": hash_password(password),
+        "razon_social": razon_social,
+        "rfc": rfc.upper(),
+        "domicilio_fiscal": domicilio_fiscal,
+        "domicilio_planta": domicilio_planta,
+        "contactos": {
+            "tecnico": {"nombre": contacto_tecnico_nombre, "tel": contacto_tecnico_tel, "correo": contacto_tecnico_correo},
+            "compras": {"nombre": contacto_compras_nombre, "tel": contacto_compras_tel, "correo": contacto_compras_correo},
+            "cuentas_por_pagar": {"nombre": contacto_cxp_nombre, "tel": contacto_cxp_tel, "correo": contacto_cxp_correo},
+        },
+        "politicas": {
+            "validacion_tecnica": politica_validacion_tecnica,
+            "firma_actas": politica_firma_actas,
+            "separacion_errores": politica_separacion_errores,
+            "ordenes_cambio": politica_ordenes_cambio,
+            "cero_fianzas": politica_cero_fianzas,
+        },
+        "financieras": {"recepcion_oc": fin_recepcion_oc, "anticipo": fin_anticipo, "dia_1": fin_dia_1},
+        "firmas": {
+            "representante": {"nombre": firma_representante_nombre, "sello": firma_representante_sello},
+            "tecnico": {"nombre": firma_tecnico_nombre, "area": firma_tecnico_area},
+        },
+        "documentos": docs,
+        "aprobaciones": [],
+        "ordenes_compra": [],
+        "created_at": iso(now_utc()),
+    }
+    await db.clientes_alta.insert_one(doc)
+    doc.pop("_id", None)
+    doc.pop("password_hash", None)
+    return doc
+
+
+@api.post("/clientes/login")
+async def cliente_login(body: dict):
+    dfnum = (body.get("dfnum") or "").strip().upper()
+    password = body.get("password") or ""
+    if not dfnum or not password:
+        raise HTTPException(status_code=400, detail="DFNUM y contraseña requeridos")
+    cli = await db.clientes_alta.find_one({"dfnum": dfnum})
+    if not cli:
+        raise HTTPException(status_code=401, detail="DFNUM o contraseña inválidos")
+    if cli.get("estado") != "aprobado_completo":
+        raise HTTPException(status_code=403, detail=f"Cliente aún en estado: {cli.get('estado')}. Solo clientes aprobados pueden ingresar.")
+    if not verify_password(password, cli.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="DFNUM o contraseña inválidos")
+    token = create_client_token(cli["id"], cli["dfnum"])
+    cli.pop("password_hash", None)
+    cli.pop("_id", None)
+    return {"access_token": token, "cliente": cli}
+
+
+@api.get("/clientes/me")
+async def cliente_me(cli: dict = Depends(get_current_cliente)):
+    return cli
+
+
+@api.get("/clientes/status/{folio_or_dfnum}")
+async def cliente_status(folio_or_dfnum: str):
+    """Consulta pública (con folio o DFNUM) del estado del trámite."""
+    q = folio_or_dfnum.strip().upper()
+    cli = await db.clientes_alta.find_one({"$or": [{"folio_registro": q}, {"dfnum": q}]},
+                                          {"_id": 0, "password_hash": 0, "documentos": 0})
+    if not cli:
+        raise HTTPException(status_code=404, detail="No se encontró ninguna solicitud con ese folio o DFNUM")
+    return {
+        "folio_registro": cli["folio_registro"],
+        "dfnum": cli.get("dfnum"),
+        "razon_social": cli["razon_social"],
+        "estado": cli["estado"],
+        "aprobaciones": cli.get("aprobaciones", []),
+        "created_at": cli["created_at"],
+    }
+
+
+@api.get("/clientes")
+async def list_clientes(estado: Optional[str] = None, user: dict = Depends(require_roles("director", "socio", "comercial"))):
+    q = {"estado": estado} if estado else {}
+    items = await db.clientes_alta.find(q, {"_id": 0, "password_hash": 0, "documentos": 0}).sort("created_at", -1).to_list(500)
+    return items
+
+
+@api.get("/clientes/{cid}")
+async def get_cliente(cid: str, user: dict = Depends(require_roles("director", "socio", "comercial"))):
+    cli = await db.clientes_alta.find_one({"id": cid}, {"_id": 0, "password_hash": 0})
+    if not cli:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    return cli
+
+
+class AprobacionIn(BaseModel):
+    nota: Optional[str] = ""
+
+
+@api.post("/clientes/{cid}/aprobar")
+async def aprobar_cliente(cid: str, body: AprobacionIn, user: dict = Depends(require_roles("director", "socio"))):
+    cli = await db.clientes_alta.find_one({"id": cid}, {"_id": 0})
+    if not cli:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    if cli.get("estado") in ("aprobado_completo", "rechazado"):
+        raise HTTPException(status_code=400, detail=f"Cliente ya está en estado final: {cli.get('estado')}")
+    aprobaciones = cli.get("aprobaciones", [])
+    if any(a["rol"] == user["role"] for a in aprobaciones):
+        raise HTTPException(status_code=400, detail=f"Ya aprobaste esta solicitud como {user['role']}")
+    aprob = {
+        "rol": user["role"],
+        "user_id": user["id"],
+        "user_name": user["name"],
+        "nota": body.nota or "",
+        "ts": iso(now_utc()),
+    }
+    aprobaciones.append(aprob)
+    # Lógica: necesita Y ambos roles
+    roles_aprobados = {a["rol"] for a in aprobaciones}
+    nuevo_estado = "pendiente"
+    upd = {"aprobaciones": aprobaciones}
+    if "director" in roles_aprobados and "socio" in roles_aprobados:
+        nuevo_estado = "aprobado_completo"
+        upd["dfnum"] = _gen_dfnum()
+        upd["aprobado_at"] = iso(now_utc())
+    elif "director" in roles_aprobados:
+        nuevo_estado = "aprobado_director"
+    elif "socio" in roles_aprobados:
+        nuevo_estado = "aprobado_socio"
+    upd["estado"] = nuevo_estado
+    await db.clientes_alta.update_one({"id": cid}, {"$set": upd})
+    return {"ok": True, "estado": nuevo_estado, "dfnum": upd.get("dfnum")}
+
+
+@api.post("/clientes/{cid}/rechazar")
+async def rechazar_cliente(cid: str, body: AprobacionIn, user: dict = Depends(require_roles("director", "socio"))):
+    cli = await db.clientes_alta.find_one({"id": cid}, {"_id": 0})
+    if not cli:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    if cli.get("estado") in ("aprobado_completo", "rechazado"):
+        raise HTTPException(status_code=400, detail=f"Cliente ya está en estado final: {cli.get('estado')}")
+    aprobaciones = cli.get("aprobaciones", [])
+    aprobaciones.append({
+        "rol": user["role"], "user_id": user["id"], "user_name": user["name"],
+        "nota": body.nota or "", "ts": iso(now_utc()), "decision": "rechazado",
+    })
+    await db.clientes_alta.update_one(
+        {"id": cid},
+        {"$set": {"estado": "rechazado", "rechazado_at": iso(now_utc()), "aprobaciones": aprobaciones}},
+    )
+    return {"ok": True, "estado": "rechazado"}
+
+
+@api.get("/clientes/{cid}/file/{doc_key}")
+async def get_cliente_file(cid: str, doc_key: str,
+                           user: dict = Depends(require_roles("director", "socio", "comercial"))):
+    """Sirve un archivo de la solicitud (csf|acta|poder|ine|comprobante)."""
+    cli = await db.clientes_alta.find_one({"id": cid}, {"_id": 0})
+    if not cli:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    docs = cli.get("documentos", {})
+    if doc_key not in docs:
+        raise HTTPException(status_code=404, detail=f"Documento {doc_key} no encontrado")
+    file_meta = docs[doc_key]
+    from bson import ObjectId
+    try:
+        stream = await gridfs_bucket.open_download_stream(ObjectId(file_meta["file_id"]))
+    except Exception:
+        raise HTTPException(status_code=404, detail="Archivo no disponible en storage")
+    contents = await stream.read()
+    import io as _io
+    return StreamingResponse(
+        _io.BytesIO(contents),
+        media_type=file_meta.get("content_type") or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{file_meta.get("filename") or doc_key}"'},
+    )
+
+
+# ----- Órdenes de Compra (cliente sube PDF) -----
+@api.post("/clientes/ordenes-compra")
+async def upload_oc(
+    referencia: str = Form(...),
+    monto: float = Form(0),
+    notas: str = Form(""),
+    archivo: UploadFile = File(...),
+    cli: dict = Depends(get_current_cliente),
+):
+    contents = await archivo.read()
+    if len(contents) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Archivo excede 15 MB")
+    if "pdf" not in (archivo.content_type or "").lower():
+        raise HTTPException(status_code=400, detail="La OC debe ser un PDF")
+    fid = await gridfs_bucket.upload_from_stream(
+        archivo.filename or "orden_compra.pdf",
+        contents,
+        metadata={"doc_type": "orden_compra", "cliente_id": cli["id"]},
+    )
+    oc = {
+        "id": new_id(),
+        "file_id": str(fid),
+        "filename": archivo.filename,
+        "referencia": referencia,
+        "monto": float(monto or 0),
+        "notas": notas,
+        "size": len(contents),
+        "uploaded_at": iso(now_utc()),
+        "uploaded_by": "client",
+    }
+    await db.clientes_alta.update_one({"id": cli["id"]}, {"$push": {"ordenes_compra": oc}})
+    return oc
+
+
+@api.get("/clientes/ordenes-compra")
+async def list_oc(cli: dict = Depends(get_current_cliente)):
+    full = await db.clientes_alta.find_one({"id": cli["id"]}, {"_id": 0, "ordenes_compra": 1})
+    return full.get("ordenes_compra", []) if full else []
+
+
+@api.get("/clientes/ordenes-compra/{oc_id}/file")
+async def download_oc(oc_id: str, cli: dict = Depends(get_current_cliente)):
+    full = await db.clientes_alta.find_one({"id": cli["id"]}, {"_id": 0, "ordenes_compra": 1})
+    oc = next((o for o in full.get("ordenes_compra", []) if o["id"] == oc_id), None)
+    if not oc:
+        raise HTTPException(status_code=404, detail="OC no encontrada")
+    from bson import ObjectId
+    stream = await gridfs_bucket.open_download_stream(ObjectId(oc["file_id"]))
+    contents = await stream.read()
+    import io as _io
+    return StreamingResponse(
+        _io.BytesIO(contents), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{oc.get("filename") or "orden_compra.pdf"}"'},
+    )
+
+
+# ----- PDFs (Alta exitosa + Bienvenida) -----
+def _build_alta_pdf(cli: dict, kind: str = "alta") -> bytes:
+    """kind = 'alta' (Recibido + en revisión) o 'bienvenida' (DFNUM asignado)."""
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    import io as _io
+
+    AMBER = colors.HexColor("#f59e0b")
+    DARK = colors.HexColor("#18181b")
+    GRAY = colors.HexColor("#71717a")
+    EMERALD = colors.HexColor("#10b981")
+
+    buf = _io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=LETTER, leftMargin=1.8 * cm, rightMargin=1.8 * cm,
+                            topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+                            title=f"DEYMA - {kind.upper()} {cli.get('folio_registro')}")
+    styles = getSampleStyleSheet()
+    body = ParagraphStyle("body", parent=styles["Normal"], fontName="Helvetica", fontSize=10, leading=14, textColor=DARK)
+    body_sm = ParagraphStyle("bs", parent=body, fontSize=8, leading=11, textColor=GRAY)
+    story = []
+
+    if kind == "alta":
+        title = "EXPEDIENTE RECIBIDO"
+        accent_color = AMBER
+        msg = (
+            "Hemos recibido exitosamente su expediente de alta como nuevo cliente DEYMA. "
+            "Su documentación se encuentra <b>en revisión</b> por parte de la Dirección y la Sociedad de "
+            "DEYMA Construcciones S.A. de C.V. Le notificaremos por correo cuando su trámite haya sido "
+            "concluido. Conserve este comprobante."
+        )
+        leyenda_status = "EN REVISIÓN"
+    else:
+        title = "¡BIENVENIDO A DEYMA!"
+        accent_color = EMERALD
+        msg = (
+            "<b>Le damos la más cordial bienvenida a la familia DEYMA.</b><br/><br/>"
+            "Es para nosotros un honor que haya elegido a DEYMA Construcciones como su aliado estratégico en "
+            "construcción industrial. Su solicitud ha sido <b>aprobada</b> por la Dirección y la Sociedad de "
+            "DEYMA, y a partir de este momento usted forma parte de nuestra cartera oficial de clientes.<br/><br/>"
+            "Agradecemos profundamente su tiempo y la confianza depositada en nosotros. Estamos comprometidos "
+            "a entregar resultados de excelencia en cada uno de los proyectos que emprendamos juntos."
+        )
+        leyenda_status = "CLIENTE ACTIVO"
+
+    # Header
+    story.append(Paragraph(
+        '<font color="#f59e0b" size="22"><b>DEYMA</b></font>'
+        '<font color="#71717a" size="22"> · RADAR</font>',
+        body))
+    story.append(Paragraph('<font color="#71717a" size="8">CONSTRUCCIÓN INDUSTRIAL · CONCRETO HIDRÁULICO · PAVIMENTACIÓN · CANASTILLAS</font>', body))
+    story.append(Spacer(1, 0.7 * cm))
+
+    # Big banner
+    banner_data = [[Paragraph(f'<para alignment="center"><font color="{"#f59e0b" if kind == "alta" else "#10b981"}" size="20"><b>{title}</b></font></para>', body)]]
+    banner = Table(banner_data, colWidths=[17 * cm])
+    banner.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), DARK),
+        ("LINEABOVE", (0, 0), (-1, -1), 3, accent_color),
+        ("LINEBELOW", (0, 0), (-1, -1), 3, accent_color),
+        ("TOPPADDING", (0, 0), (-1, -1), 18),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 18),
+    ]))
+    story.append(banner)
+    story.append(Spacer(1, 0.6 * cm))
+
+    # Folio / DFNUM block
+    info_data = [
+        [Paragraph('<font color="#71717a" size="8"><b>FOLIO DE REGISTRO</b></font>', body),
+         Paragraph(f'<font color="#f59e0b" size="14"><b>{cli.get("folio_registro", "—")}</b></font>', body)],
+    ]
+    if kind == "bienvenida" and cli.get("dfnum"):
+        info_data.append([
+            Paragraph('<font color="#71717a" size="8"><b>NÚMERO DE CLIENTE</b></font>', body),
+            Paragraph(f'<font color="#10b981" size="16"><b>{cli["dfnum"]}</b></font>', body),
+        ])
+    info_data.append([
+        Paragraph('<font color="#71717a" size="8"><b>FECHA</b></font>', body),
+        Paragraph(f'<font size="10">{datetime.now().strftime("%d de %B de %Y · %H:%M")}</font>', body),
+    ])
+    info_data.append([
+        Paragraph('<font color="#71717a" size="8"><b>ESTATUS</b></font>', body),
+        Paragraph(f'<font color="{"#f59e0b" if kind == "alta" else "#10b981"}" size="11"><b>{leyenda_status}</b></font>', body),
+    ])
+    info_tbl = Table(info_data, colWidths=[5 * cm, 12 * cm])
+    info_tbl.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, GRAY),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#e4e4e7")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(info_tbl)
+    story.append(Spacer(1, 0.6 * cm))
+
+    # Datos del cliente
+    story.append(Paragraph('<font color="#71717a" size="8"><b>DATOS DE LA EMPRESA</b></font>', body))
+    story.append(Spacer(1, 0.1 * cm))
+    cli_block = [
+        ["Razón social:", cli.get("razon_social", "—")],
+        ["RFC:", cli.get("rfc", "—")],
+        ["Domicilio fiscal:", cli.get("domicilio_fiscal", "—")[:120]],
+        ["Representante legal:", cli.get("firmas", {}).get("representante", {}).get("nombre", "—")],
+    ]
+    cli_tbl = Table(cli_block, colWidths=[4 * cm, 13 * cm])
+    cli_tbl.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("TEXTCOLOR", (0, 0), (0, -1), GRAY),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(cli_tbl)
+    story.append(Spacer(1, 0.5 * cm))
+
+    # Mensaje
+    story.append(Paragraph(msg, body))
+    story.append(Spacer(1, 0.6 * cm))
+
+    if kind == "alta":
+        # Lista documentos cargados
+        story.append(Paragraph('<font color="#71717a" size="8"><b>DOCUMENTOS RECIBIDOS</b></font>', body))
+        doc_labels = {
+            "csf": "Constancia de Situación Fiscal",
+            "acta": "Carátula del Acta Constitutiva",
+            "poder": "Poder del Representante Legal",
+            "ine": "Identificación Oficial (INE/Pasaporte)",
+            "comprobante": "Comprobante de Domicilio",
+        }
+        doc_rows = []
+        for k, label in doc_labels.items():
+            if cli.get("documentos", {}).get(k):
+                doc_rows.append([f"✓  {label}", cli["documentos"][k].get("filename", "—")])
+        doc_tbl = Table(doc_rows, colWidths=[9 * cm, 8 * cm])
+        doc_tbl.setStyle(TableStyle([
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("TEXTCOLOR", (0, 0), (0, -1), EMERALD),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(doc_tbl)
+    else:
+        # Welcome message: contacto y siguientes pasos
+        story.append(Paragraph('<font color="#71717a" size="8"><b>SIGUIENTES PASOS</b></font>', body))
+        steps = (
+            "1. Ingrese a su Portal Cliente DEYMA con su número de cliente "
+            f"<b>{cli.get('dfnum', 'DFNUM-XXXXXX')}</b> y la contraseña que registró.<br/>"
+            "2. Una vez dentro, podrá subir sus Órdenes de Compra (PDF) en el módulo "
+            "<b>ÓRDENES DE COMPRA</b> para iniciar el arranque del proyecto.<br/>"
+            "3. Recibirá comunicación directa de su contacto comercial asignado para programar visita técnica."
+        )
+        story.append(Paragraph(steps, body))
+
+    story.append(Spacer(1, 1 * cm))
+    story.append(Paragraph('<font color="#71717a" size="8">Atentamente,<br/><b>DEYMA Construcciones S.A. de C.V.</b><br/>contacto@deyma.mx</font>', body_sm))
+
+    def _footer(canvas, _doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(GRAY)
+        canvas.drawString(1.8 * cm, 1 * cm, "DEYMA · CONSTRUCCIÓN INDUSTRIAL · DOCUMENTO OFICIAL")
+        canvas.drawRightString(20 * cm, 1 * cm, f"Folio {cli.get('folio_registro')} · Página {_doc.page}")
+        canvas.setStrokeColor(accent_color)
+        canvas.setLineWidth(1.5)
+        canvas.line(1.8 * cm, 1.3 * cm, 20 * cm, 1.3 * cm)
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    return buf.getvalue()
+
+
+@api.get("/clientes/{cid}/pdf-alta")
+async def pdf_alta(cid: str):
+    """PDF de Alta Exitosa — público para el folio del propio cliente (sin auth, solo conociendo el id)."""
+    cli = await db.clientes_alta.find_one({"id": cid}, {"_id": 0, "password_hash": 0})
+    if not cli:
+        raise HTTPException(status_code=404, detail="No encontrado")
+    pdf_bytes = await asyncio.to_thread(_build_alta_pdf, cli, "alta")
+    import io as _io
+    return StreamingResponse(
+        _io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="DEYMA_alta_{cli["folio_registro"]}.pdf"'},
+    )
+
+
+@api.get("/clientes/{cid}/pdf-bienvenida")
+async def pdf_bienvenida(cid: str):
+    cli = await db.clientes_alta.find_one({"id": cid}, {"_id": 0, "password_hash": 0})
+    if not cli:
+        raise HTTPException(status_code=404, detail="No encontrado")
+    if cli.get("estado") != "aprobado_completo":
+        raise HTTPException(status_code=400, detail="El PDF de bienvenida solo está disponible cuando el cliente está aprobado")
+    pdf_bytes = await asyncio.to_thread(_build_alta_pdf, cli, "bienvenida")
+    import io as _io
+    return StreamingResponse(
+        _io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="DEYMA_bienvenida_{cli["dfnum"]}.pdf"'},
+    )
 
 
 # ----------------------------------------------------------------------------
