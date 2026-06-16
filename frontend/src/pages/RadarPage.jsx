@@ -126,6 +126,17 @@ export default function RadarPage() {
         <div className="ml-auto font-mono text-xs text-zinc-500">{filtered.length} proyectos detectados</div>
       </div>
 
+      {/* Disclaimer Greenfield demo */}
+      {gfStats.total > 0 && (
+        <div className="border border-rose-500/60 bg-rose-500/10 p-2.5 flex items-start gap-2 text-[11px]" data-testid="radar-gf-disclaimer">
+          <span className="text-rose-400 font-bold">⚠️</span>
+          <div className="text-rose-200/90">
+            Los proyectos con badge <b>GREENFIELD OSINT</b> son <b>EJEMPLOS DEMO</b> generados por el sistema (Foxconn/Tesla/Bombardier/etc. son empresas reales pero los detalles del proyecto son simulados).
+            Para leads verificados conecta Brave Search API.
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
         {filtered.map((p) => {
           const isGF = p.is_greenfield;
