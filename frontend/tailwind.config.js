@@ -5,6 +5,12 @@ module.exports = {
     "./src/**/*.{js,jsx,ts,tsx}",
     "./public/index.html"
   ],
+  safelist: [
+    // Colores dinámicos usados en Radar Greenfield (badges, borders, text)
+    {
+      pattern: /(bg|text|border)-(zinc|sky|indigo|fuchsia|amber|emerald|rose)-(400|500)(\/(10|20|30|40|50))?/,
+    },
+  ],
   theme: {
     extend: {
       borderRadius: {

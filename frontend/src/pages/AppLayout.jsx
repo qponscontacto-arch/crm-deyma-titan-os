@@ -1,11 +1,12 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
-import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus, Users2, Navigation, Wallet } from "lucide-react";
+import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus, Users2, Navigation, Wallet, Satellite } from "lucide-react";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testId: "nav-dashboard" },
   { to: "/radar", label: "Radar de Proyectos", icon: Radar, testId: "nav-radar" },
+  { to: "/admin/radar-greenfield", label: "Radar Greenfield OSINT", icon: Satellite, testId: "nav-radar-greenfield", roles: ["director", "socio", "comercial", "operaciones"] },
   { to: "/scraper", label: "Scraper Nocturno", icon: Bot, testId: "nav-scraper" },
   { to: "/crm", label: "CRM Comercial", icon: Users, testId: "nav-crm" },
   { to: "/cotizador", label: "Cotizador", icon: FileText, testId: "nav-cotizador" },

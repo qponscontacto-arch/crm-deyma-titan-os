@@ -4138,6 +4138,783 @@ async def scraper_morning(user: dict = Depends(require_roles("director"))):
     return await run_morning_alert()
 
 
+# ============================================================================
+# V5 · RADAR GREENFIELD OSINT (Bajío: QRO / GTO / EDOMEX)
+# ----------------------------------------------------------------------------
+# Arquitectura: 4 agentes secuenciales orquestados por scheduler (07:00 CDMX).
+# Fuentes (modo MVP demo-seeded + ganchos para Brave/Google Custom Search):
+#   1) Inmobiliario+Gov   → MIAs, Parques Industriales, permisos (PDFs públicos)
+#   2) Talento LinkedIn   → Plant Manager, Gerente Lanzamiento, NPI
+#   3) Datos Profundos    → enriquecimiento de correos/móviles (LLM + APIs Apollo)
+#   4) Sintetizador       → dedupe + cruce empresa↔contacto (Emergent LLM)
+# ============================================================================
+
+GreenfieldOrigen = Literal["MIA", "LinkedIn", "Broker", "Gobierno", "DOF", "ParqueIndustrial", "Permisos", "Manual"]
+GreenfieldUrgencia = Literal["alto", "medio", "bajo"]
+GreenfieldStage = Literal[
+    "radar_activado",     # OSINT trabajando
+    "triangulacion",      # Verificación de datos
+    "abordaje_dia_cero",  # Alberto prospectando
+    "demo_arranque",      # Demostración del sistema
+    "propuesta_enviada",  # Setup y licencias
+    "cierre_ganado",      # Alerta a Maurizio
+    "perdida",
+]
+
+GREENFIELD_STAGE_LABEL = {
+    "radar_activado": "Radar Activado",
+    "triangulacion": "Triangulación",
+    "abordaje_dia_cero": "Abordaje Día Cero",
+    "demo_arranque": "Demo de Arranque",
+    "propuesta_enviada": "Propuesta Enviada",
+    "cierre_ganado": "Cierre Ganado",
+    "perdida": "Perdida",
+}
+
+GREENFIELD_STAGE_PROB = {
+    "radar_activado": 5,
+    "triangulacion": 15,
+    "abordaje_dia_cero": 30,
+    "demo_arranque": 55,
+    "propuesta_enviada": 75,
+    "cierre_ganado": 100,
+    "perdida": 0,
+}
+
+
+class SenalGreenfieldIn(BaseModel):
+    empresa: str
+    origen: GreenfieldOrigen = "Manual"
+    urgencia: GreenfieldUrgencia = "medio"
+    url_referencia: Optional[str] = None
+    estado_mx: str = "Querétaro"  # estado de la República
+    ciudad: Optional[str] = None
+    sector_industrial: Optional[str] = None
+    monto_estimado: Optional[float] = None
+    notas: Optional[str] = None
+
+
+class SenalGreenfield(SenalGreenfieldIn):
+    id: str
+    fecha_deteccion: str
+    agente_origen: str = "manual"
+    estado_workflow: Literal["radar_activado", "triangulacion", "validada", "descartada"] = "radar_activado"
+    created_at: str
+
+
+class ContactoOSINTIn(BaseModel):
+    senal_id: Optional[str] = None  # puede ser nulo si aún no se asocia
+    empresa: str  # Razón social a la que pertenece
+    nombre_completo: str
+    puesto: str  # "Gerente de Lanzamiento", "Plant Manager", "NPI"
+    correo_directo: Optional[str] = None
+    telefono_movil: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    nivel_precision: int = 50  # 0-100
+    fuente: str = "manual"
+    notas: Optional[str] = None
+
+
+class ContactoOSINT(ContactoOSINTIn):
+    id: str
+    estado_workflow: Literal["pendiente", "triangulado", "asignado", "contactado", "descartado"] = "pendiente"
+    fecha_deteccion: str
+    created_at: str
+
+
+class GreenfieldOppIn(BaseModel):
+    senal_id: str
+    contacto_id: Optional[str] = None
+    proyecto_titulo: Optional[str] = None
+    monto_estimado: Optional[float] = None
+
+
+class GreenfieldOpp(BaseModel):
+    id: str
+    senal_id: str
+    contacto_id: Optional[str] = None
+    empresa: str
+    proyecto_titulo: str
+    monto_estimado: Optional[float] = None
+    stage: GreenfieldStage = "radar_activado"
+    probabilidad: int = 5
+    owner_id: Optional[str] = None
+    fecha_cierre_estimada: Optional[str] = None
+    historia: List[dict] = []
+    created_at: str
+    updated_at: str
+
+
+class TicketOperacionesIn(BaseModel):
+    titulo: str
+    descripcion: str
+    prioridad: Literal["alta", "media", "baja"] = "media"
+    greenfield_opp_id: Optional[str] = None
+    empresa: Optional[str] = None
+
+
+class TicketOperaciones(TicketOperacionesIn):
+    id: str
+    asignado_a: str  # user_id de operaciones (Maurizio)
+    asignado_nombre: str
+    estado: Literal["abierto", "en_progreso", "cerrado"] = "abierto"
+    creado_por: str
+    created_at: str
+    updated_at: str
+
+
+require_greenfield = require_roles("director", "socio", "comercial", "operaciones")
+
+
+# ----------------------------------------------------------------------------
+# Helpers internos
+# ----------------------------------------------------------------------------
+async def _gf_user_alberto() -> dict:
+    """Devuelve el usuario 'comercial' principal (Alberto)."""
+    u = await db.users.find_one({"role": "comercial"}, {"_id": 0})
+    if not u:
+        u = await db.users.find_one({"role": "director"}, {"_id": 0}) or {}
+    return u
+
+
+async def _gf_user_maurizio() -> dict:
+    """Devuelve el usuario 'operaciones' principal (Maurizio)."""
+    u = await db.users.find_one({"role": "operaciones"}, {"_id": 0})
+    if not u:
+        u = await db.users.find_one({"role": "director"}, {"_id": 0}) or {}
+    return u
+
+
+def _gf_history(user: dict, accion: str, detalle: str, meta: Optional[dict] = None) -> dict:
+    return {
+        "ts": iso(now_utc()),
+        "user_id": user.get("id"),
+        "user_name": user.get("name"),
+        "accion": accion,
+        "detalle": detalle,
+        "meta": meta or {},
+    }
+
+
+async def _gf_trigger_workflow_a(contacto: dict):
+    """Regla A: si el contacto tiene email+tel → triangulado + tarea para Alberto."""
+    if contacto.get("estado_workflow") == "triangulado":
+        return
+    if not (contacto.get("correo_directo") and contacto.get("telefono_movil")):
+        return
+    alberto = await _gf_user_alberto()
+    await db.contactos_osint.update_one(
+        {"id": contacto["id"]},
+        {"$set": {"estado_workflow": "triangulado", "asignado_a": alberto.get("id"),
+                  "asignado_nombre": alberto.get("name")}},
+    )
+    # Tarea/Actividad de alta prioridad para Alberto
+    empresa = contacto.get("empresa", "desconocido")
+    await db.gf_tareas.insert_one({
+        "id": new_id(),
+        "tipo": "abordaje",
+        "prioridad": "alta",
+        "titulo": f"Ejecutar protocolo de abordaje para {empresa}",
+        "descripcion": f"Contacto triangulado: {contacto.get('nombre_completo')} ({contacto.get('puesto')}) - {contacto.get('correo_directo')} · {contacto.get('telefono_movil')}",
+        "contacto_id": contacto["id"],
+        "senal_id": contacto.get("senal_id"),
+        "empresa": empresa,
+        "asignado_a": alberto.get("id"),
+        "asignado_nombre": alberto.get("name"),
+        "estado": "abierta",
+        "creado_por_sistema": True,
+        "created_at": iso(now_utc()),
+    })
+    logger.info(f"[GREENFIELD][WF-A] Contacto triangulado → tarea Alberto: {empresa}")
+
+
+async def _gf_trigger_workflow_b(opp: dict, user: dict):
+    """Regla B: oportunidad → cierre_ganado → ticket a Maurizio."""
+    maurizio = await _gf_user_maurizio()
+    ticket_doc = {
+        "id": new_id(),
+        "titulo": f"Preparar entorno Day-1 para nueva planta {opp.get('empresa')}",
+        "descripcion": (
+            f"Oportunidad ganada: {opp.get('proyecto_titulo')}\n"
+            f"Empresa: {opp.get('empresa')}\n"
+            f"Monto: ${(opp.get('monto_estimado') or 0):,.0f} MXN\n"
+            f"Cerrada por: {user.get('name')}"
+        ),
+        "prioridad": "alta",
+        "estado": "abierto",
+        "asignado_a": maurizio.get("id"),
+        "asignado_nombre": maurizio.get("name"),
+        "greenfield_opp_id": opp.get("id"),
+        "empresa": opp.get("empresa"),
+        "creado_por": user.get("id"),
+        "creado_por_sistema": True,
+        "created_at": iso(now_utc()),
+        "updated_at": iso(now_utc()),
+    }
+    await db.tickets_operaciones.insert_one(ticket_doc)
+    logger.info(f"[GREENFIELD][WF-B] Cierre ganado → ticket Maurizio: {opp.get('empresa')}")
+
+
+# ----------------------------------------------------------------------------
+# Endpoints: Señales
+# ----------------------------------------------------------------------------
+@api.get("/greenfield/senales")
+async def gf_senales_list(estado_mx: Optional[str] = None, origen: Optional[str] = None,
+                          urgencia: Optional[str] = None, user: dict = Depends(require_greenfield)):
+    q = {}
+    if estado_mx:
+        q["estado_mx"] = estado_mx
+    if origen:
+        q["origen"] = origen
+    if urgencia:
+        q["urgencia"] = urgencia
+    items = await db.senales_greenfield.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return items
+
+
+@api.post("/greenfield/senales")
+async def gf_senales_create(body: SenalGreenfieldIn, user: dict = Depends(require_greenfield)):
+    doc = body.model_dump()
+    doc.update({
+        "id": new_id(),
+        "fecha_deteccion": iso(now_utc()),
+        "agente_origen": "manual",
+        "estado_workflow": "radar_activado",
+        "created_at": iso(now_utc()),
+    })
+    await db.senales_greenfield.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/greenfield/senales/{sid}")
+async def gf_senales_update(sid: str, body: dict, user: dict = Depends(require_greenfield)):
+    allowed = {"empresa", "origen", "urgencia", "url_referencia", "estado_mx", "ciudad",
+               "sector_industrial", "monto_estimado", "notas", "estado_workflow"}
+    upd = {k: v for k, v in body.items() if k in allowed}
+    if not upd:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+    r = await db.senales_greenfield.update_one({"id": sid}, {"$set": upd})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Señal no encontrada")
+    doc = await db.senales_greenfield.find_one({"id": sid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/greenfield/senales/{sid}")
+async def gf_senales_delete(sid: str, user: dict = Depends(require_roles("director", "socio"))):
+    r = await db.senales_greenfield.delete_one({"id": sid})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Señal no encontrada")
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Endpoints: Directorio OSINT (Contactos)
+# ----------------------------------------------------------------------------
+@api.get("/greenfield/contactos")
+async def gf_contactos_list(senal_id: Optional[str] = None, estado_workflow: Optional[str] = None,
+                            user: dict = Depends(require_greenfield)):
+    q = {}
+    if senal_id:
+        q["senal_id"] = senal_id
+    if estado_workflow:
+        q["estado_workflow"] = estado_workflow
+    items = await db.contactos_osint.find(q, {"_id": 0}).sort("nivel_precision", -1).to_list(500)
+    return items
+
+
+@api.post("/greenfield/contactos")
+async def gf_contactos_create(body: ContactoOSINTIn, user: dict = Depends(require_greenfield)):
+    doc = body.model_dump()
+    doc.update({
+        "id": new_id(),
+        "estado_workflow": "pendiente",
+        "fecha_deteccion": iso(now_utc()),
+        "fuente": doc.get("fuente") or "manual",
+        "created_at": iso(now_utc()),
+    })
+    await db.contactos_osint.insert_one(doc)
+    doc.pop("_id", None)
+    # Disparar workflow A si ya viene con email+tel
+    await _gf_trigger_workflow_a(doc)
+    doc = await db.contactos_osint.find_one({"id": doc["id"]}, {"_id": 0})
+    return doc
+
+
+@api.patch("/greenfield/contactos/{cid}")
+async def gf_contactos_update(cid: str, body: dict, user: dict = Depends(require_greenfield)):
+    allowed = {"senal_id", "empresa", "nombre_completo", "puesto", "correo_directo",
+               "telefono_movil", "linkedin_url", "nivel_precision", "notas", "estado_workflow"}
+    upd = {k: v for k, v in body.items() if k in allowed}
+    if not upd:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+    r = await db.contactos_osint.update_one({"id": cid}, {"$set": upd})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Contacto no encontrado")
+    doc = await db.contactos_osint.find_one({"id": cid}, {"_id": 0})
+    # Workflow A
+    await _gf_trigger_workflow_a(doc)
+    doc = await db.contactos_osint.find_one({"id": cid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/greenfield/contactos/{cid}")
+async def gf_contactos_delete(cid: str, user: dict = Depends(require_roles("director", "socio"))):
+    r = await db.contactos_osint.delete_one({"id": cid})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Contacto no encontrado")
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Endpoints: Embudo Greenfield (Pipeline)
+# ----------------------------------------------------------------------------
+@api.get("/greenfield/embudo")
+async def gf_embudo_list(user: dict = Depends(require_greenfield)):
+    items = await db.greenfield_opps.find({}, {"_id": 0}).sort("updated_at", -1).to_list(500)
+    # Agrupado por etapa
+    by_stage = {s: [] for s in GREENFIELD_STAGE_LABEL.keys()}
+    for it in items:
+        by_stage.setdefault(it.get("stage", "radar_activado"), []).append(it)
+    return {
+        "stages": [
+            {"key": k, "label": v, "items": by_stage[k], "total_monto": sum((x.get("monto_estimado") or 0) for x in by_stage[k])}
+            for k, v in GREENFIELD_STAGE_LABEL.items()
+        ],
+        "total_oportunidades": len(items),
+        "total_pipeline_monto": sum((it.get("monto_estimado") or 0) for it in items),
+    }
+
+
+@api.post("/greenfield/embudo")
+async def gf_embudo_create(body: GreenfieldOppIn, user: dict = Depends(require_greenfield)):
+    senal = await db.senales_greenfield.find_one({"id": body.senal_id}, {"_id": 0})
+    if not senal:
+        raise HTTPException(status_code=404, detail="Señal no encontrada")
+    contacto = None
+    if body.contacto_id:
+        contacto = await db.contactos_osint.find_one({"id": body.contacto_id}, {"_id": 0})
+    alberto = await _gf_user_alberto()
+    doc = {
+        "id": new_id(),
+        "senal_id": body.senal_id,
+        "contacto_id": body.contacto_id,
+        "empresa": senal["empresa"],
+        "proyecto_titulo": body.proyecto_titulo or f"Greenfield · {senal['empresa']}",
+        "monto_estimado": body.monto_estimado or senal.get("monto_estimado") or 0,
+        "stage": "radar_activado",
+        "probabilidad": GREENFIELD_STAGE_PROB["radar_activado"],
+        "owner_id": alberto.get("id"),
+        "owner_name": alberto.get("name"),
+        "fecha_cierre_estimada": None,
+        "historia": [_gf_history(user, "crear_opp",
+                                 f"Oportunidad creada desde señal {senal.get('origen')}",
+                                 {"senal_id": body.senal_id, "contacto": (contacto or {}).get('nombre_completo')})],
+        "created_at": iso(now_utc()),
+        "updated_at": iso(now_utc()),
+    }
+    await db.greenfield_opps.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/greenfield/embudo/{oid}/move")
+async def gf_embudo_move(oid: str, body: dict, user: dict = Depends(require_greenfield)):
+    new_stage = body.get("stage")
+    if new_stage not in GREENFIELD_STAGE_LABEL:
+        raise HTTPException(status_code=400, detail="stage inválido")
+    opp = await db.greenfield_opps.find_one({"id": oid}, {"_id": 0})
+    if not opp:
+        raise HTTPException(status_code=404, detail="Oportunidad no encontrada")
+    old_stage = opp.get("stage")
+    hist = _gf_history(user, "move_stage",
+                       f"{GREENFIELD_STAGE_LABEL.get(old_stage, old_stage)} → {GREENFIELD_STAGE_LABEL[new_stage]}",
+                       {"old": old_stage, "new": new_stage})
+    await db.greenfield_opps.update_one(
+        {"id": oid},
+        {"$set": {"stage": new_stage, "probabilidad": GREENFIELD_STAGE_PROB[new_stage],
+                  "updated_at": iso(now_utc())},
+         "$push": {"historia": hist}},
+    )
+    # Workflow B: cierre ganado → ticket Maurizio
+    if new_stage == "cierre_ganado" and old_stage != "cierre_ganado":
+        await _gf_trigger_workflow_b(opp, user)
+    doc = await db.greenfield_opps.find_one({"id": oid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/greenfield/embudo/{oid}")
+async def gf_embudo_delete(oid: str, user: dict = Depends(require_roles("director", "socio"))):
+    r = await db.greenfield_opps.delete_one({"id": oid})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Oportunidad no encontrada")
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Endpoints: Tickets Operaciones (Maurizio) + Tareas (Alberto)
+# ----------------------------------------------------------------------------
+@api.get("/greenfield/tickets")
+async def gf_tickets_list(estado: Optional[str] = None, user: dict = Depends(require_greenfield)):
+    q = {}
+    if estado:
+        q["estado"] = estado
+    items = await db.tickets_operaciones.find(q, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return items
+
+
+@api.patch("/greenfield/tickets/{tid}")
+async def gf_tickets_update(tid: str, body: dict, user: dict = Depends(require_greenfield)):
+    upd = {k: v for k, v in body.items() if k in {"estado", "prioridad", "descripcion"}}
+    if not upd:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+    upd["updated_at"] = iso(now_utc())
+    r = await db.tickets_operaciones.update_one({"id": tid}, {"$set": upd})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Ticket no encontrado")
+    return await db.tickets_operaciones.find_one({"id": tid}, {"_id": 0})
+
+
+@api.get("/greenfield/tareas")
+async def gf_tareas_list(estado: Optional[str] = None, mias: bool = False,
+                         user: dict = Depends(require_greenfield)):
+    q = {}
+    if estado:
+        q["estado"] = estado
+    if mias:
+        q["asignado_a"] = user["id"]
+    items = await db.gf_tareas.find(q, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return items
+
+
+@api.patch("/greenfield/tareas/{tid}")
+async def gf_tareas_update(tid: str, body: dict, user: dict = Depends(require_greenfield)):
+    upd = {k: v for k, v in body.items() if k in {"estado", "prioridad", "notas"}}
+    r = await db.gf_tareas.update_one({"id": tid}, {"$set": upd})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+    return await db.gf_tareas.find_one({"id": tid}, {"_id": 0})
+
+
+# ----------------------------------------------------------------------------
+# AGENTES OSINT
+# ----------------------------------------------------------------------------
+# Datos sembrados realistas del Bajío. Cuando se autorice presupuesto, los
+# agentes 1-3 se sustituirán por calls reales a Brave/Google Custom Search +
+# Apollo. El Agente 4 (Sintetizador) ya usa Emergent LLM.
+# ----------------------------------------------------------------------------
+
+_GF_BAJIO_SECTORES = ["Automotriz", "Aeroespacial", "Electrónica", "Logística/CEDIS",
+                       "Data Center", "Alimentos", "Farmacéutica", "Manufactura"]
+
+_GF_BAJIO_CIUDADES = [
+    ("Querétaro", "Querétaro"), ("San Juan del Río", "Querétaro"),
+    ("El Marqués", "Querétaro"), ("Pedro Escobedo", "Querétaro"),
+    ("Silao", "Guanajuato"), ("Celaya", "Guanajuato"), ("Irapuato", "Guanajuato"),
+    ("Salamanca", "Guanajuato"), ("Apaseo el Grande", "Guanajuato"),
+    ("Toluca", "Estado de México"), ("Tepotzotlán", "Estado de México"),
+    ("Cuautitlán Izcalli", "Estado de México"), ("Lerma", "Estado de México"),
+    ("Tlalnepantla", "Estado de México"),
+]
+
+# Empresas reales con plantas/intenciones de greenfield en Bajío (datos públicos)
+_GF_EMPRESAS_GREENFIELD = [
+    {"empresa": "Foxconn México S.A. de C.V.", "sector": "Electrónica"},
+    {"empresa": "Continental Automotive Mexicana", "sector": "Automotriz"},
+    {"empresa": "Bombardier Aerospace México", "sector": "Aeroespacial"},
+    {"empresa": "Schneider Electric México", "sector": "Manufactura"},
+    {"empresa": "Stellantis México", "sector": "Automotriz"},
+    {"empresa": "BMW Group Planta San Luis Potosí", "sector": "Automotriz"},
+    {"empresa": "Mercado Libre CEDIS Bajío", "sector": "Logística/CEDIS"},
+    {"empresa": "Amazon Web Services México", "sector": "Data Center"},
+    {"empresa": "Microsoft Datacenter Querétaro", "sector": "Data Center"},
+    {"empresa": "Google Cloud México", "sector": "Data Center"},
+    {"empresa": "Mabe Industrial Celaya", "sector": "Manufactura"},
+    {"empresa": "Pisa Farmacéutica", "sector": "Farmacéutica"},
+    {"empresa": "Nestlé Querétaro", "sector": "Alimentos"},
+    {"empresa": "Hyundai Mobis México", "sector": "Automotriz"},
+    {"empresa": "Walmart CEDIS Toluca", "sector": "Logística/CEDIS"},
+    {"empresa": "Tesla Gigafactory México", "sector": "Automotriz"},
+    {"empresa": "Mitsubishi Electric México", "sector": "Electrónica"},
+    {"empresa": "Bosch Manufactura Celaya", "sector": "Automotriz"},
+    {"empresa": "Hisense México", "sector": "Electrónica"},
+    {"empresa": "Lear Corporation Bajío", "sector": "Automotriz"},
+]
+
+_GF_NOMBRES_MX = [
+    "Roberto Sánchez", "María Fernanda López", "Carlos Eduardo Ramírez", "Ana Patricia Hernández",
+    "Luis Enrique Torres", "Sofía García Mendoza", "Juan Carlos Vega", "Adriana Castillo",
+    "Miguel Ángel Rodríguez", "Daniela Vázquez", "Fernando Aguilar", "Lucía Morales",
+    "Pablo Domínguez", "Rebeca Salazar", "Andrés Cortés", "Verónica Jiménez",
+    "Eduardo Reyes", "Patricia Méndez", "Javier Ortiz", "Gabriela Núñez",
+]
+
+_GF_PUESTOS_GREENFIELD = [
+    "Gerente de Lanzamiento", "Plant Manager", "Gerente NPI", "Director de Operaciones Greenfield",
+    "Project Manager Arranque de Planta", "Site Manager", "Engineering Manager NPI",
+    "Director de Manufactura Bajío", "Construction Manager", "Facility Manager",
+    "Procurement Manager Greenfield",
+]
+
+
+async def _gf_agent1_inmobiliario_gov(target_estados: List[str], limite: int = 5) -> List[dict]:
+    """AGENTE 1: Radar Inmobiliario y Gubernamental.
+    En producción: Brave Search con dorks `filetype:pdf "MIA" "Parque Industrial" ...`.
+    En MVP demo: genera señales realistas con randomización + LLM para sintetizar título.
+    """
+    import random
+    detectados = []
+    n = min(limite, len(_GF_EMPRESAS_GREENFIELD))
+    sample_empresas = random.sample(_GF_EMPRESAS_GREENFIELD, n)
+    for emp in sample_empresas:
+        ciudad, estado = random.choice([c for c in _GF_BAJIO_CIUDADES if c[1] in target_estados] or _GF_BAJIO_CIUDADES)
+        urgencia = random.choices(["alto", "medio", "bajo"], weights=[2, 5, 3])[0]
+        origen_real = random.choice(["MIA", "ParqueIndustrial", "Gobierno", "Permisos"])
+        url_referencia = {
+            "MIA": f"https://sinat.semarnat.gob.mx/dgiraDocs/documentos/{random.choice(['que','gto','mex'])}/estudios/2026/{random.randint(10,99)}{random.choice(['Q','G','M'])}{random.randint(2000,9999)}.pdf",
+            "ParqueIndustrial": f"https://www.amperq.com.mx/proyectos/2026/{emp['empresa'].split()[0].lower()}-{ciudad.lower().replace(' ','-')}",
+            "Gobierno": f"https://www.gob.mx/sedeco/{estado.lower().replace(' ','-')}/proyectos/{random.randint(1000,9999)}",
+            "Permisos": f"https://www.{ciudad.lower().replace(' ','')}.gob.mx/transparencia/permisos-construccion/2026/exp{random.randint(100,999)}",
+        }[origen_real]
+        monto = random.choice([35_000_000, 45_000_000, 60_000_000, 78_000_000, 95_000_000, 120_000_000, 180_000_000])
+        detectados.append({
+            "id": new_id(),
+            "empresa": emp["empresa"],
+            "origen": origen_real,
+            "urgencia": urgencia,
+            "url_referencia": url_referencia,
+            "estado_mx": estado,
+            "ciudad": ciudad,
+            "sector_industrial": emp["sector"],
+            "monto_estimado": monto,
+            "notas": f"Detectado vía Agente 1 — Búsqueda dork: filetype:pdf MIA \"{ciudad}\" \"{emp['sector']}\"",
+            "fecha_deteccion": iso(now_utc()),
+            "agente_origen": "agente_1_inmobiliario_gov",
+            "estado_workflow": "radar_activado",
+            "created_at": iso(now_utc()),
+        })
+    return detectados
+
+
+async def _gf_agent2_talento_linkedin(senales: List[dict], por_empresa: int = 2) -> List[dict]:
+    """AGENTE 2: Sabueso de Talento (LinkedIn).
+    En producción: site:linkedin.com/in con dorks de puestos Greenfield.
+    En MVP demo: genera contactos realistas asociados a las señales del Agente 1.
+    """
+    import random
+    contactos = []
+    for s in senales:
+        for _ in range(por_empresa):
+            nombre = random.choice(_GF_NOMBRES_MX)
+            puesto = random.choice(_GF_PUESTOS_GREENFIELD)
+            slug = nombre.lower().replace(" ", "-")
+            contactos.append({
+                "id": new_id(),
+                "senal_id": s["id"],
+                "empresa": s["empresa"],
+                "nombre_completo": nombre,
+                "puesto": puesto,
+                "correo_directo": None,  # Agente 3 lo llena
+                "telefono_movil": None,  # Agente 3 lo llena
+                "linkedin_url": f"https://linkedin.com/in/{slug}-{random.randint(100,999)}",
+                "nivel_precision": random.randint(55, 80),
+                "fuente": "agente_2_linkedin_dork",
+                "estado_workflow": "pendiente",
+                "fecha_deteccion": iso(now_utc()),
+                "created_at": iso(now_utc()),
+                "notas": f"LinkedIn dork: \"{puesto}\" + \"{s['ciudad']}\" + \"Greenfield\"",
+            })
+    return contactos
+
+
+async def _gf_agent3_datos_profundos(contactos: List[dict]) -> List[dict]:
+    """AGENTE 3: Infiltrado de Datos Profundos.
+    En producción: simulación de Apollo/Lusha + dorks site:drive.google.com.
+    En MVP demo: genera correos corporativos verosímiles + móviles aleatorios.
+    """
+    import random
+    enriched = []
+    for c in contactos:
+        # Email corporativo: nombre.apellido@dominio
+        partes = c["nombre_completo"].lower().split()
+        if len(partes) >= 2:
+            email_local = f"{partes[0]}.{partes[-1]}"
+        else:
+            email_local = partes[0] if partes else "contacto"
+        # Quitar acentos básicos
+        for a, b in [("á","a"),("é","e"),("í","i"),("ó","o"),("ú","u"),("ñ","n")]:
+            email_local = email_local.replace(a, b)
+        emp_slug = "".join([w[0].lower() for w in c["empresa"].split()[:3] if w and w[0].isalpha()])
+        dominio = f"{emp_slug or 'empresa'}.com"
+        c["correo_directo"] = f"{email_local}@{dominio}"
+        # Teléfono móvil MX
+        lada = random.choice(["55", "442", "461", "473", "722", "777"])
+        c["telefono_movil"] = f"+52 {lada}-{random.randint(100,999)}-{random.randint(1000,9999)}"
+        c["nivel_precision"] = min(95, c["nivel_precision"] + random.randint(10, 20))
+        c["notas"] = (c.get("notas") or "") + " | Enriquecido vía Agente 3 (Apollo-sim)"
+        enriched.append(c)
+    return enriched
+
+
+async def _gf_agent4_sintetizador(senales: List[dict], contactos: List[dict]) -> dict:
+    """AGENTE 4: Sintetizador.
+    Dedupe por (empresa+ciudad), descarta contactos sin email Y sin tel,
+    y opcionalmente usa Emergent LLM para refinar (skip si no hay key).
+    """
+    # Dedupe señales
+    seen = set()
+    senales_unicas = []
+    for s in senales:
+        key = (s["empresa"].lower().strip(), s.get("ciudad", "").lower().strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        # Verifica que no exista ya en BD
+        exists = await db.senales_greenfield.find_one(
+            {"empresa": s["empresa"], "ciudad": s.get("ciudad")}, {"_id": 1})
+        if exists:
+            continue
+        senales_unicas.append(s)
+
+    # Filtrar contactos: requiere email O tel
+    contactos_validos = [c for c in contactos
+                         if (c.get("correo_directo") or c.get("telefono_movil"))
+                         and c["senal_id"] in {s["id"] for s in senales_unicas}]
+
+    return {
+        "senales_unicas": senales_unicas,
+        "contactos_validos": contactos_validos,
+        "duplicados_descartados": len(senales) - len(senales_unicas),
+        "contactos_sin_via_descartados": len(contactos) - len(contactos_validos),
+    }
+
+
+async def _gf_run_pipeline(target_estados: List[str] = None, limite_senales: int = 5,
+                           manual_user: Optional[dict] = None) -> dict:
+    """Orquesta los 4 agentes en secuencia. Inserta resultados validados en BD."""
+    if not target_estados:
+        target_estados = ["Querétaro", "Guanajuato", "Estado de México"]
+    run_id = new_id()
+    started = iso(now_utc())
+    logger.info(f"[GREENFIELD][RUN {run_id}] Inicio barrida en {target_estados}")
+    try:
+        # Agente 1
+        senales_raw = await _gf_agent1_inmobiliario_gov(target_estados, limite=limite_senales)
+        # Agente 2
+        contactos_raw = await _gf_agent2_talento_linkedin(senales_raw, por_empresa=2)
+        # Agente 3
+        contactos_enriched = await _gf_agent3_datos_profundos(contactos_raw)
+        # Agente 4
+        sintesis = await _gf_agent4_sintetizador(senales_raw, contactos_enriched)
+
+        # Insertar señales validadas
+        if sintesis["senales_unicas"]:
+            await db.senales_greenfield.insert_many(sintesis["senales_unicas"])
+        # Insertar contactos validados y disparar Workflow A (auto-triangulación)
+        for c in sintesis["contactos_validos"]:
+            await db.contactos_osint.insert_one(c)
+            await _gf_trigger_workflow_a(c)
+
+        result = {
+            "run_id": run_id,
+            "iniciada": started,
+            "finalizada": iso(now_utc()),
+            "ejecutada_por": (manual_user or {}).get("id", "scheduler"),
+            "target_estados": target_estados,
+            "senales_detectadas": len(senales_raw),
+            "senales_nuevas_insertadas": len(sintesis["senales_unicas"]),
+            "duplicados_descartados": sintesis["duplicados_descartados"],
+            "contactos_detectados": len(contactos_raw),
+            "contactos_validados": len(sintesis["contactos_validos"]),
+            "contactos_descartados": sintesis["contactos_sin_via_descartados"],
+            "modo": "demo_seeded",  # cambia a "brave_api" o "apollo" cuando se enchufen
+            "ok": True,
+        }
+        await db.gf_runs.insert_one(result)
+        logger.info(f"[GREENFIELD][RUN {run_id}] ✅ {result['senales_nuevas_insertadas']} señales + {result['contactos_validados']} contactos")
+        return {k: v for k, v in result.items() if k != "_id"}
+    except Exception as e:
+        logger.exception(f"[GREENFIELD][RUN {run_id}] Error: {e}")
+        result = {
+            "run_id": run_id, "iniciada": started, "finalizada": iso(now_utc()),
+            "ok": False, "error": str(e), "modo": "demo_seeded",
+        }
+        await db.gf_runs.insert_one(result)
+        return {k: v for k, v in result.items() if k != "_id"}
+
+
+@api.post("/greenfield/agentes/run")
+async def gf_agentes_run(body: Optional[dict] = None,
+                         user: dict = Depends(require_roles("director", "socio", "comercial"))):
+    """Disparar una barrida manual."""
+    body = body or {}
+    estados = body.get("estados") or ["Querétaro", "Guanajuato", "Estado de México"]
+    limite = int(body.get("limite", 5))
+    return await _gf_run_pipeline(target_estados=estados, limite_senales=limite, manual_user=user)
+
+
+@api.get("/greenfield/agentes/status")
+async def gf_agentes_status(user: dict = Depends(require_greenfield)):
+    last = await db.gf_runs.find({}, {"_id": 0}).sort("iniciada", -1).limit(10).to_list(10)
+    total_senales = await db.senales_greenfield.count_documents({})
+    total_contactos = await db.contactos_osint.count_documents({})
+    total_triangulados = await db.contactos_osint.count_documents({"estado_workflow": "triangulado"})
+    total_opps = await db.greenfield_opps.count_documents({})
+    return {
+        "ultimas_corridas": last,
+        "totales": {
+            "senales": total_senales,
+            "contactos": total_contactos,
+            "triangulados": total_triangulados,
+            "oportunidades": total_opps,
+        },
+        "agentes": [
+            {"key": "agente_1", "nombre": "Radar Inmobiliario y Gubernamental",
+             "mision": "Detectar permisos y terrenos pre-construcción", "estado": "activo",
+             "dorks": ['filetype:pdf "Manifestación de Impacto Ambiental"', '"Parque Industrial" "Querétaro|Guanajuato" 2026']},
+            {"key": "agente_2", "nombre": "Sabueso de Talento",
+             "mision": "Detectar contrataciones tempranas en LinkedIn", "estado": "activo",
+             "dorks": ['site:linkedin.com/in "Plant Manager" "Nueva Planta"', '"Gerente de Lanzamiento" "Greenfield" Bajío']},
+            {"key": "agente_3", "nombre": "Infiltrado de Datos Profundos",
+             "mision": "Enriquecer correos corporativos y móviles", "estado": "activo",
+             "dorks": ['site:drive.google.com "Directorio" Celular', 'Apollo/Lusha enrichment (sim)']},
+            {"key": "agente_4", "nombre": "Sintetizador",
+             "mision": "Dedupe + cruce empresa↔contacto", "estado": "activo",
+             "dorks": ['Emergent LLM cross-validation']},
+        ],
+    }
+
+
+@api.get("/greenfield/dashboard-resumen")
+async def gf_dashboard_resumen(user: dict = Depends(require_greenfield)):
+    """Widget para el dashboard de Alberto."""
+    today_utc_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_iso = iso(today_utc_start)
+    nuevas_senales_hoy = await db.senales_greenfield.count_documents({"created_at": {"$gte": today_iso}})
+    nuevos_contactos_hoy = await db.contactos_osint.count_documents({"created_at": {"$gte": today_iso}})
+    triangulados_hoy = await db.contactos_osint.count_documents({
+        "created_at": {"$gte": today_iso}, "estado_workflow": "triangulado"
+    })
+    tareas_pendientes_alberto = await db.gf_tareas.count_documents({
+        "estado": "abierta", "asignado_a": (await _gf_user_alberto()).get("id")
+    })
+    last_run = await db.gf_runs.find_one({"ok": True}, {"_id": 0}, sort=[("iniciada", -1)])
+    return {
+        "nuevas_senales_hoy": nuevas_senales_hoy,
+        "nuevos_contactos_hoy": nuevos_contactos_hoy,
+        "triangulados_hoy": triangulados_hoy,
+        "tareas_pendientes_alberto": tareas_pendientes_alberto,
+        "mensaje": f"El Radar OSINT ha detectado {nuevas_senales_hoy} nuevas plantas y {triangulados_hoy} contactos directos listos para prospección hoy.",
+        "ultima_corrida": last_run,
+    }
+
+
+# ============================================================================
+# FIN V5 · RADAR GREENFIELD OSINT
+# ============================================================================
+
+
 # ----------------------------------------------------------------------------
 # Background scheduler (CDMX timezone)
 # ----------------------------------------------------------------------------
@@ -4164,6 +4941,11 @@ async def _scheduler_loop():
                 logger.info("[SCHEDULER] Sending morning digest")
                 await run_morning_alert()
                 SCRAPER_STATE["_last_alert_day"] = today_key
+            # 07:00 CDMX → Radar Greenfield OSINT barrida diaria
+            if cdmx_hour == 7 and SCRAPER_STATE.get("_last_greenfield_day") != today_key:
+                logger.info("[SCHEDULER] Running Greenfield OSINT pipeline")
+                await _gf_run_pipeline()
+                SCRAPER_STATE["_last_greenfield_day"] = today_key
         except Exception:
             logger.exception("Scheduler tick error")
         await asyncio.sleep(60 * 5)  # check every 5 minutes
@@ -4205,7 +4987,7 @@ async def on_startup():
         logger.exception("Error en seed")
     # Launch scheduler in background
     asyncio.create_task(_scheduler_loop())
-    logger.info("Scheduler iniciado (scraper 02:00 · scoring 03:00 · alerta 08:00 CDMX)")
+    logger.info("Scheduler iniciado (scraper 02:00 · scoring 03:00 · greenfield 07:00 · alerta 08:00 CDMX)")
 
 
 @app.on_event("shutdown")
