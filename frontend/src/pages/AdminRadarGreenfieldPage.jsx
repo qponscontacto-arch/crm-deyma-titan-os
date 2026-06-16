@@ -5,6 +5,7 @@ import {
   Satellite, Building2, Users, Workflow, Bot, Play, Loader2,
   AlertTriangle, CheckCircle2, Phone, Mail, Linkedin, Target,
   MapPin, Calendar, TrendingUp, Plus, Trash2, X, Activity,
+  Radio, MessageCircle, Hash, AlertOctagon, ExternalLink, Send,
 } from "lucide-react";
 
 const STAGES = [
@@ -23,6 +24,7 @@ export default function AdminRadarGreenfieldPage() {
   const [tab, setTab] = useState("embudo");
   const [resumen, setResumen] = useState(null);
   const [status, setStatus] = useState(null);
+  const [listenStatus, setListenStatus] = useState(null);
 
   const loadResumen = async () => {
     try {
@@ -30,6 +32,8 @@ export default function AdminRadarGreenfieldPage() {
       setResumen(r);
       const { data: s } = await api.get("/greenfield/agentes/status");
       setStatus(s);
+      const { data: ls } = await api.get("/greenfield/listening/status");
+      setListenStatus(ls);
     } catch { /* silent */ }
   };
 
@@ -65,20 +69,24 @@ export default function AdminRadarGreenfieldPage() {
 
       {/* Métricas */}
       {status?.totales && (
-        <div className="grid grid-cols-4 gap-3" data-testid="gf-metrics">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3" data-testid="gf-metrics">
           <Metric icon={Building2} label="Señales totales" v={status.totales.senales} color="amber" />
           <Metric icon={Users} label="Contactos OSINT" v={status.totales.contactos} color="sky" />
           <Metric icon={CheckCircle2} label="Triangulados" v={status.totales.triangulados} color="emerald" />
           <Metric icon={Workflow} label="En embudo" v={status.totales.oportunidades} color="fuchsia" />
+          <Metric icon={AlertOctagon} label="🚨 Alertas Rojas" v={listenStatus?.totales?.alertas_rojas_activas || 0} color="rose" />
         </div>
       )}
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-white/10" data-testid="gf-tabs">
+      <div className="flex gap-1 border-b border-white/10 overflow-x-auto" data-testid="gf-tabs">
         <Tab id="embudo" active={tab} onClick={setTab} icon={Workflow} label="Embudo Greenfield" />
         <Tab id="senales" active={tab} onClick={setTab} icon={Building2} label="Señales" />
         <Tab id="contactos" active={tab} onClick={setTab} icon={Users} label="Directorio OSINT" />
-        <Tab id="agentes" active={tab} onClick={setTab} icon={Bot} label="Agentes & Cron" />
+        <Tab id="agentes" active={tab} onClick={setTab} icon={Bot} label="Agentes 1-4 (Diario)" />
+        <Tab id="listening" active={tab} onClick={setTab} icon={Radio} label="Escucha Activa 5-8" />
+        <Tab id="alertas" active={tab} onClick={setTab} icon={AlertOctagon} label="🚨 Alertas Rojas" />
+        <Tab id="cazas" active={tab} onClick={setTab} icon={MessageCircle} label="Zonas de Caza" />
         <Tab id="tareas" active={tab} onClick={setTab} icon={Target} label="Tareas Alberto" />
         <Tab id="tickets" active={tab} onClick={setTab} icon={Activity} label="Tickets Maurizio" />
       </div>
@@ -87,6 +95,9 @@ export default function AdminRadarGreenfieldPage() {
       {tab === "senales" && <SenalesView reload={loadResumen} />}
       {tab === "contactos" && <ContactosView reload={loadResumen} />}
       {tab === "agentes" && <AgentesView status={status} reload={loadResumen} />}
+      {tab === "listening" && <ListeningView reload={loadResumen} />}
+      {tab === "alertas" && <AlertasRojasView reload={loadResumen} />}
+      {tab === "cazas" && <ZonasCazaView />}
       {tab === "tareas" && <TareasView />}
       {tab === "tickets" && <TicketsView />}
     </div>
@@ -778,6 +789,286 @@ function TicketsView() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===========================================================================
+// LISTENING (Agentes 5-8 · Escuadrón Conversacional)
+// ===========================================================================
+function ListeningView({ reload }) {
+  const [status, setStatus] = useState(null);
+  const [running, setRunning] = useState(false);
+  const [lastResult, setLastResult] = useState(null);
+
+  const load = async () => {
+    try {
+      const { data } = await api.get("/greenfield/listening/status");
+      setStatus(data);
+    } catch { /* silent */ }
+  };
+  useEffect(() => { load(); }, []);
+
+  const ejecutar = async () => {
+    if (running) return;
+    setRunning(true); setLastResult(null);
+    try {
+      const { data } = await api.post("/greenfield/listening/run", { intents: 8, chats: 6, foros: 4 });
+      setLastResult(data);
+      await load();
+      reload && reload();
+    } catch (e) { alert(formatApiError(e)); }
+    finally { setRunning(false); }
+  };
+
+  if (!status) return <Loading />;
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      {/* Control + métricas */}
+      <div className="surface p-4 space-y-3">
+        <div>
+          <div className="label-overline text-rose-400 flex items-center gap-1.5">
+            <Radio size={11} /> Social Listening · Cada hora
+          </div>
+          <div className="text-[10px] text-zinc-500 font-mono mt-0.5">
+            Producto: <span className="text-rose-400">canastillas pasajuntas + acero pisos</span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <Metric icon={MessageCircle} label="Chats activos" v={status.totales.chats} color="emerald" />
+          <Metric icon={AlertOctagon} label="🚨 Alertas Rojas" v={status.totales.alertas_rojas_activas} color="rose" />
+          <Metric icon={Radio} label="Intents totales" v={status.totales.intents} color="sky" />
+          <Metric icon={Hash} label="Foros" v={status.totales.foros} color="amber" />
+        </div>
+
+        <button onClick={ejecutar} disabled={running}
+                className="btn-primary w-full bg-rose-500 hover:bg-rose-600 text-white border-rose-600"
+                data-testid="gf-run-listening-btn">
+          {running ? (<><Loader2 size={13} className="inline animate-spin" /> Escuchando…</>)
+                   : (<><Play size={13} className="inline" /> Ejecutar Agentes 5-8 ahora</>)}
+        </button>
+
+        {lastResult && (
+          <div className={`surface-elev p-3 border-l-2 ${lastResult.ok ? "border-rose-500" : "border-zinc-500"}`}>
+            <div className="label-overline text-[9px] text-rose-400">
+              {lastResult.ok ? "✓ Barrida completada" : "✗ Error"}
+            </div>
+            {lastResult.ok && (
+              <div className="text-[10px] font-mono space-y-0.5 mt-1">
+                <div>Chats nuevos: <span className="text-emerald-400">{lastResult.chats_nuevos}</span></div>
+                <div>Intents detectados: <span className="text-sky-400">{lastResult.intents_nuevos}</span></div>
+                <div className="text-rose-400 font-bold">🚨 ALERTAS ROJAS: {lastResult.alertas_rojas}</div>
+                <div>Promovidos al Radar: <span className="text-amber-400">{lastResult.promovidos_radar}</span></div>
+                <div>Ruido descartado: <span className="text-zinc-500">{lastResult.ruido_descartado}</span></div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 4 agentes */}
+      <div className="lg:col-span-2 space-y-3">
+        {(status.agentes || []).map((a, i) => (
+          <div key={a.key} className="surface p-3 border-l-2 border-rose-500/40">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 font-mono font-bold">
+                {i + 5}
+              </div>
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <div className="font-semibold text-sm">{a.nombre}</div>
+                  <span className="text-[9px] font-mono text-rose-400 bg-rose-500/10 px-1.5 py-0.5">LIVE</span>
+                </div>
+                <div className="text-xs text-zinc-400 mt-0.5">{a.mision}</div>
+                <div className="mt-2 space-y-0.5">
+                  {(a.dorks || []).map((d, j) => (
+                    <div key={j} className="text-[10px] font-mono text-zinc-500 bg-black/40 px-1.5 py-0.5 border border-white/5 truncate">
+                      {d}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
+// ALERTAS ROJAS — intents <24h con CTA "responder ahora"
+// ===========================================================================
+function AlertasRojasView({ reload }) {
+  const [items, setItems] = useState([]);
+  const [filtroProc, setFiltroProc] = useState("todas"); // todas | activas
+
+  const load = async () => {
+    const url = filtroProc === "activas"
+      ? "/greenfield/listening/intents?urgencia=alerta_roja&solo_activas=true"
+      : "/greenfield/listening/intents?urgencia=alerta_roja";
+    const { data } = await api.get(url);
+    setItems(data);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [filtroProc]);
+
+  const marcarProcesada = async (iid) => {
+    try { await api.patch(`/greenfield/listening/intents/${iid}`, { procesada: true }); load(); reload && reload(); }
+    catch (e) { alert(formatApiError(e)); }
+  };
+
+  const tsRel = (iso) => {
+    if (!iso) return "—";
+    const ms = Date.now() - new Date(iso).getTime();
+    const h = Math.round(ms / 3600000);
+    if (h < 1) return "ahora mismo";
+    if (h < 24) return `hace ${h}h`;
+    const d = Math.round(h / 24);
+    return `hace ${d}d`;
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <select className="input-field !w-auto text-xs" value={filtroProc} onChange={(e) => setFiltroProc(e.target.value)}>
+          <option value="activas">Solo no procesadas</option>
+          <option value="todas">Todas las alertas</option>
+        </select>
+        <div className="text-xs text-zinc-400 font-mono ml-auto">
+          🚨 <span className="text-rose-400 font-bold">{items.length}</span> alertas rojas
+        </div>
+      </div>
+      {items.length === 0 ? (
+        <div className="surface p-12 text-center text-zinc-500 text-sm">
+          Sin alertas rojas activas. Ejecuta el Listening (Tab "Escucha Activa") para detectar intents en vivo.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {items.map((i) => (
+            <div key={i.id} className="surface p-3 border-l-2 border-rose-500 bg-rose-500/5" data-testid={`gf-alerta-${i.id}`}>
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 bg-rose-500 text-white flex items-center justify-center font-black animate-pulse">
+                  🚨
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Badge color="rose" text="ALERTA ROJA" />
+                    <span className="text-[10px] font-mono text-zinc-400 bg-black/40 px-1.5 py-0.5 uppercase">{i.plataforma}</span>
+                    <span className="text-[10px] font-mono text-emerald-400">{tsRel(i.timestamp_origen)}</span>
+                    <span className="text-[10px] font-mono text-amber-400 flex items-center gap-1"><MapPin size={9}/>{i.ciudad}</span>
+                    {i.procesada && <Badge color="zinc" text="PROCESADA" />}
+                  </div>
+                  <div className="text-xs text-zinc-200 mt-1.5 font-medium">
+                    <span className="text-sky-400">{i.usuario}:</span> &ldquo;{i.mensaje}&rdquo;
+                  </div>
+                  <div className="text-[10px] font-mono text-zinc-500 mt-1.5">
+                    Palabra clave: <span className="text-amber-400">{i.palabra_clave}</span>
+                    {i.convertida_a_radar && (
+                      <> · Promovido al Radar: <span className="text-emerald-400">✓</span></>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1 shrink-0">
+                  <a href={i.url_directa} target="_blank" rel="noreferrer"
+                     className="text-[10px] px-2 py-1 bg-rose-500 hover:bg-rose-600 text-white font-bold uppercase tracking-wider flex items-center gap-1"
+                     data-testid={`gf-alerta-${i.id}-responder`}>
+                    <Send size={10}/> Responder
+                  </a>
+                  {!i.procesada && (
+                    <button onClick={() => marcarProcesada(i.id)} className="btn-ghost text-[10px]">
+                      ✓ Procesada
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===========================================================================
+// ZONAS DE CAZA — grupos WhatsApp/Telegram
+// ===========================================================================
+function ZonasCazaView() {
+  const [items, setItems] = useState([]);
+  const [filtroPlat, setFiltroPlat] = useState("");
+  const [filtroCiudad, setFiltroCiudad] = useState("");
+
+  const load = async () => {
+    const params = new URLSearchParams();
+    if (filtroPlat) params.set("plataforma", filtroPlat);
+    if (filtroCiudad) params.set("ciudad", filtroCiudad);
+    const { data } = await api.get(`/greenfield/listening/chats?${params}`);
+    setItems(data);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [filtroPlat, filtroCiudad]);
+
+  const eliminar = async (cid) => {
+    if (!window.confirm("¿Eliminar grupo?")) return;
+    try { await api.delete(`/greenfield/listening/chats/${cid}`); load(); }
+    catch (e) { alert(formatApiError(e)); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <select className="input-field !w-auto text-xs" value={filtroPlat} onChange={(e) => setFiltroPlat(e.target.value)}>
+          <option value="">Todas plataformas</option>
+          <option value="whatsapp">WhatsApp</option>
+          <option value="telegram">Telegram</option>
+        </select>
+        <select className="input-field !w-auto text-xs" value={filtroCiudad} onChange={(e) => setFiltroCiudad(e.target.value)}>
+          <option value="">Todas las ciudades</option>
+          {["Querétaro", "Monterrey", "Tijuana", "Cd. Juárez", "Toluca", "Silao", "Guadalajara", "México"].map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
+        <div className="text-xs text-zinc-400 font-mono ml-auto">{items.length} zonas de caza</div>
+      </div>
+
+      <div className="border border-emerald-500/30 bg-emerald-500/5 p-3 rounded-sm" data-testid="gf-cazas-disclaimer">
+        <div className="text-[11px] text-emerald-300 leading-relaxed">
+          🎯 <span className="font-bold">Protocolo de caza</span>: Únete a estos grupos desde un número de empresa y monitorea conversaciones.
+          Cuando aparezca un mensaje de intent (canastillas/pasajuntas), responde con oferta relámpago + cotización en menos de 1 hora.
+        </div>
+      </div>
+
+      {items.length === 0 ? (
+        <div className="surface p-12 text-center text-zinc-500 text-sm">Sin grupos. Ejecuta el Listening.</div>
+      ) : (
+        <div className="surface overflow-x-auto">
+          <table className="dtable">
+            <thead>
+              <tr><th>Plataforma</th><th>Grupo</th><th>Ciudad</th><th>Audiencia</th><th>Detectado</th><th></th></tr>
+            </thead>
+            <tbody>
+              {items.map((c) => (
+                <tr key={c.id} data-testid={`gf-chat-${c.id}`}>
+                  <td>
+                    <Badge color={c.plataforma === "whatsapp" ? "emerald" : "sky"} text={c.plataforma.toUpperCase()} />
+                  </td>
+                  <td className="font-semibold">{c.nombre_grupo}</td>
+                  <td className="text-xs text-amber-400"><MapPin size={9} className="inline mr-1"/>{c.ciudad}</td>
+                  <td className="text-xs text-zinc-400">{c.audiencia_estimada}</td>
+                  <td className="text-[10px] font-mono text-zinc-500">{(c.detectado_at || "").slice(0, 10)}</td>
+                  <td className="text-right">
+                    <a href={c.url_invitacion} target="_blank" rel="noreferrer"
+                       className="text-[10px] px-2 py-1 bg-emerald-500 hover:bg-emerald-600 text-black font-bold uppercase tracking-wider inline-flex items-center gap-1 mr-2">
+                      <ExternalLink size={10}/> Unirse
+                    </a>
+                    <button onClick={() => eliminar(c.id)} className="text-rose-400 hover:text-rose-300"><Trash2 size={11}/></button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

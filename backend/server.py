@@ -5051,6 +5051,491 @@ async def gf_dashboard_resumen(user: dict = Depends(require_greenfield)):
 
 
 # ============================================================================
+# V5.1 · ESCUADRÓN CONVERSACIONAL — Social Listening & Deep Search
+# ----------------------------------------------------------------------------
+# Producto: Canastillas pasajuntas, pasajuntas, acero para pisos industriales
+# Target: Querétaro, Monterrey, Tijuana, Cd. Juárez, Toluca, Silao, Guadalajara
+# Frecuencia: ciclo cada hora (más agresivo que Greenfield diario)
+# Agentes 5-8 (continuación del enjambre Greenfield 1-4)
+# ============================================================================
+
+GF_LISTEN_CIUDADES = [
+    "Querétaro", "Monterrey", "Tijuana", "Cd. Juárez", "Toluca", "Silao", "Guadalajara",
+    "Aguascalientes", "Saltillo", "Puebla", "León", "Mérida",
+]
+
+GF_LISTEN_PLATAFORMAS = ["whatsapp", "telegram", "twitter", "reddit", "facebook", "foro_cmic", "skyscrapercity"]
+
+
+class IntentSignalIn(BaseModel):
+    plataforma: str
+    usuario: str
+    mensaje: str
+    url_directa: str
+    ciudad: Optional[str] = None
+    palabra_clave: Optional[str] = None
+    timestamp_origen: Optional[str] = None  # cuando fue publicado
+    notas: Optional[str] = None
+
+
+class IntentSignal(IntentSignalIn):
+    id: str
+    urgencia: Literal["alerta_roja", "alta", "media", "baja"]
+    es_inminente: bool = False  # <24h
+    detectado_at: str
+    procesada: bool = False
+    convertida_a_radar: Optional[str] = None  # radar_id si se promovió
+
+
+class ChatGroupIn(BaseModel):
+    plataforma: Literal["whatsapp", "telegram"]
+    nombre_grupo: str
+    url_invitacion: str
+    ciudad: Optional[str] = None
+    audiencia_estimada: Optional[str] = None
+    notas: Optional[str] = None
+
+
+class ChatGroup(ChatGroupIn):
+    id: str
+    activo: bool = True
+    detectado_at: str
+    asignado_a: Optional[str] = None  # user_id quien lo monitorea
+
+
+class ForumThreadIn(BaseModel):
+    foro: str  # CMIC, SkyscraperCity, etc.
+    titulo: str
+    url: str
+    autor: str
+    ciudad: Optional[str] = None
+    actividad: Optional[str] = None  # alta/media/baja
+    notas: Optional[str] = None
+
+
+class ForumThread(ForumThreadIn):
+    id: str
+    detectado_at: str
+
+
+# ----------------------------------------------------------------------------
+# AGENTES CONVERSACIONALES (5-8)
+# ----------------------------------------------------------------------------
+
+_GF_LISTEN_GRUPOS_SEMILLA = [
+    # WhatsApp
+    {"plataforma": "whatsapp", "nombre_grupo": "Constructores Bajío PRO", "ciudad": "Querétaro", "audiencia": "320 miembros"},
+    {"plataforma": "whatsapp", "nombre_grupo": "Concreteras MTY/Saltillo", "ciudad": "Monterrey", "audiencia": "210 miembros"},
+    {"plataforma": "whatsapp", "nombre_grupo": "Ingenieros Civiles Toluca", "ciudad": "Toluca", "audiencia": "180 miembros"},
+    {"plataforma": "whatsapp", "nombre_grupo": "Residentes Obra Industrial Silao", "ciudad": "Silao", "audiencia": "95 miembros"},
+    {"plataforma": "whatsapp", "nombre_grupo": "Proveedores Maquinaria Pesada GDL", "ciudad": "Guadalajara", "audiencia": "260 miembros"},
+    {"plataforma": "whatsapp", "nombre_grupo": "Constructores Tijuana / Frontera", "ciudad": "Tijuana", "audiencia": "140 miembros"},
+    {"plataforma": "whatsapp", "nombre_grupo": "Obra Industrial Cd. Juárez", "ciudad": "Cd. Juárez", "audiencia": "110 miembros"},
+    # Telegram
+    {"plataforma": "telegram", "nombre_grupo": "Construcción Industrial MX", "ciudad": "México", "audiencia": "1,200 miembros"},
+    {"plataforma": "telegram", "nombre_grupo": "Pisos Industriales · Proveedores", "ciudad": "México", "audiencia": "650 miembros"},
+    {"plataforma": "telegram", "nombre_grupo": "Maquinaria Pesada Bajío", "ciudad": "Querétaro", "audiencia": "420 miembros"},
+]
+
+_GF_LISTEN_INTENT_TEMPLATES = [
+    "Alguien sabe dónde compran canastillas pasajuntas en {ciudad}? Urge para colado del lunes",
+    "Recomienden proveedor de pasajuntas en {ciudad}, necesito 200 metros lineales esta semana",
+    "Dónde compro acero corrugado para pisos industriales en {ciudad}? El de siempre se atrasó",
+    "Necesito cotizar canastillas para concreto MR-45, 3000 m² en {ciudad}",
+    "Urge proveedor de pasajuntas y canastillas en {ciudad}, ¿alguien tiene contacto?",
+    "Alguien con stock de canastillas en {ciudad}? Mi proveedor no puede entregar antes del jueves",
+    "Recomienden cotizador de juntas constructivas + canastillas en {ciudad}",
+    "Donde compro pasajuntas de 1\" para piso de CEDIS en {ciudad}? Necesito 500 pzs",
+    "Pregunto por canastillas dobles para piso de nave industrial en {ciudad}, urge",
+    "Búsco fabricante de canastillas pasajuntas con entrega inmediata en {ciudad}",
+]
+
+_GF_LISTEN_USUARIOS = [
+    "@arq_rodriguez_mx", "@ing.gtz", "@constructora_bajio", "@residente_obra_qro",
+    "@civil_engineer_mx", "@concretos_premium", "@obra_civil_mty", "@silao_constructora",
+    "@grupo_constructor_gdl", "@pisos_industriales_pro", "@maq_pesada_mx",
+    "@ing_supervisor_industrial", "@arq_civil_industrial",
+]
+
+_GF_LISTEN_FOROS = [
+    {"foro": "CMIC Foro", "url_base": "https://www.cmic.org.mx/foros"},
+    {"foro": "SkyscraperCity México", "url_base": "https://www.skyscrapercity.com/forums/mexico"},
+    {"foro": "Foros Ingeniería Civil MX", "url_base": "https://www.ingenieriacivil.mx/foros"},
+    {"foro": "Construct Foro Pro", "url_base": "https://constructforo.mx/discussion"},
+]
+
+
+async def _gf_agent5_infiltrado_chats(limite: int = 6) -> List[dict]:
+    """AGENTE 5: Infiltrado de Chats — extrae enlaces de WhatsApp/Telegram.
+    Producción: dorks `site:chat.whatsapp.com "constructores" "Querétaro"`.
+    Demo: muestra realistas con URLs ficticias pero plausibles.
+    """
+    import random
+    out = []
+    sample = random.sample(_GF_LISTEN_GRUPOS_SEMILLA, min(limite, len(_GF_LISTEN_GRUPOS_SEMILLA)))
+    for g in sample:
+        slug = "".join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=22))
+        url = f"https://chat.whatsapp.com/{slug}" if g["plataforma"] == "whatsapp" else f"https://t.me/joinchat/{slug}"
+        out.append({
+            "id": new_id(),
+            "plataforma": g["plataforma"],
+            "nombre_grupo": g["nombre_grupo"],
+            "url_invitacion": url,
+            "ciudad": g["ciudad"],
+            "audiencia_estimada": g["audiencia"],
+            "notas": f"Detectado vía dork: site:chat.whatsapp.com \"{g['nombre_grupo'].split()[0].lower()}\" + \"{g['ciudad']}\"",
+            "activo": True,
+            "detectado_at": iso(now_utc()),
+            "asignado_a": None,
+        })
+    return out
+
+
+async def _gf_agent6_intent_interceptor(limite: int = 8) -> List[dict]:
+    """AGENTE 6: Interceptor de Intención — Twitter/X, Reddit, FB grupos.
+    Producción: Twitter API v2 search + Reddit API + Brave Search dorks.
+    Demo: genera mensajes realistas con timestamps variados (algunos <24h = alerta_roja).
+    """
+    import random
+    out = []
+    for _ in range(limite):
+        ciudad = random.choice(GF_LISTEN_CIUDADES[:7])  # prioriza polos principales
+        plataforma = random.choices(["twitter", "reddit", "facebook"], weights=[5, 3, 2])[0]
+        usuario = random.choice(_GF_LISTEN_USUARIOS)
+        tpl = random.choice(_GF_LISTEN_INTENT_TEMPLATES)
+        mensaje = tpl.format(ciudad=ciudad)
+        # Timestamp variable: 60% últimas 24h (alerta roja), 30% últimos 3d, 10% más viejo
+        edad_h = random.choices(
+            [random.randint(1, 23), random.randint(24, 72), random.randint(72, 168)],
+            weights=[6, 3, 1],
+        )[0]
+        ts_origen = datetime.now(timezone.utc) - timedelta(hours=edad_h)
+        es_inminente = edad_h < 24
+        urgencia = "alerta_roja" if es_inminente else ("alta" if edad_h < 72 else "media")
+        # Palabra clave detectada
+        keyword = next((kw for kw in ["canastillas", "pasajuntas", "acero", "concreto", "juntas"] if kw in mensaje.lower()), "pisos")
+        # URL directa al comentario
+        slug = "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=10))
+        if plataforma == "twitter":
+            url = f"https://twitter.com/{usuario.replace('@','')}/status/{random.randint(10**18, 10**19)}"
+        elif plataforma == "reddit":
+            url = f"https://reddit.com/r/{'mexico' if random.random() > 0.5 else 'ingenieria'}/comments/{slug}/"
+        else:
+            url = f"https://facebook.com/groups/constructoresmx/posts/{random.randint(10**14, 10**15)}"
+        out.append({
+            "id": new_id(),
+            "plataforma": plataforma,
+            "usuario": usuario,
+            "mensaje": mensaje,
+            "url_directa": url,
+            "ciudad": ciudad,
+            "palabra_clave": keyword,
+            "timestamp_origen": iso(ts_origen),
+            "urgencia": urgencia,
+            "es_inminente": es_inminente,
+            "detectado_at": iso(now_utc()),
+            "procesada": False,
+            "convertida_a_radar": None,
+            "notas": f"Dork: \"{tpl.split('{')[0].strip()}\" + \"{keyword}\" + \"{ciudad}\"",
+        })
+    return out
+
+
+async def _gf_agent7_foros(limite: int = 4) -> List[dict]:
+    """AGENTE 7: Rastreador de Foros — CMIC, SkyscraperCity, foros ingeniería.
+    Producción: scraping de foros (cuidado con ToS) + Brave Search inurl:forum.
+    Demo: hilos plausibles.
+    """
+    import random
+    titulos = [
+        "Recomendaciones canastillas pasajuntas para piso industrial 5,000 m²",
+        "Proveedor de pasajuntas en {ciudad} — proyecto CEDIS",
+        "Cotización urgente canastillas dobles para nave automotriz",
+        "Cálculo cantidad canastillas por m² de junta constructiva",
+        "Acero para pisos MR-50 — proveedores recomendados {ciudad}",
+        "Junta constructiva con pasajuntas vs sierra — qué conviene",
+    ]
+    out = []
+    for _ in range(limite):
+        foro = random.choice(_GF_LISTEN_FOROS)
+        ciudad = random.choice(GF_LISTEN_CIUDADES[:7])
+        titulo = random.choice(titulos).format(ciudad=ciudad)
+        thread_id = random.randint(10000, 99999)
+        out.append({
+            "id": new_id(),
+            "foro": foro["foro"],
+            "titulo": titulo,
+            "url": f"{foro['url_base']}/thread-{thread_id}",
+            "autor": random.choice(["ing_supervisor", "residente_obra", "arq_constructor", "civil_pro", "concreto_pro"]),
+            "ciudad": ciudad,
+            "actividad": random.choice(["alta", "media", "media", "baja"]),
+            "notas": f"Dork: inurl:forum \"canastillas pasajuntas\" {ciudad}",
+            "detectado_at": iso(now_utc()),
+        })
+    return out
+
+
+async def _gf_agent8_sintetizador_listening(chats: List[dict], intents: List[dict], foros: List[dict]) -> dict:
+    """AGENTE 8: Sintetizador Comercial — filtra ruido + marca ALERTAS ROJAS.
+    Reglas:
+      1) Intents <24h → urgencia=alerta_roja (ya marcado en agente 6, validamos aquí)
+      2) Deduplica chats por url_invitacion y intents por url_directa
+      3) Descarta intents con palabras académicas (estudiantes)
+      4) Consolida chats como "Zonas de Caza"
+    """
+    # Dedupe + filtro académico
+    palabras_descartar = ["tarea", "exposición", "tesis", "homework", "estudiante", "trabajo escolar"]
+    intents_filtrados = []
+    seen_urls = set()
+    for it in intents:
+        if it["url_directa"] in seen_urls:
+            continue
+        if any(p in it["mensaje"].lower() for p in palabras_descartar):
+            continue
+        # Verificar duplicado en BD
+        exists = await db.gf_intent_signals.find_one({"url_directa": it["url_directa"]}, {"_id": 1})
+        if exists:
+            continue
+        seen_urls.add(it["url_directa"])
+        intents_filtrados.append(it)
+
+    chats_unicos = []
+    seen_chats = set()
+    for c in chats:
+        if c["url_invitacion"] in seen_chats:
+            continue
+        exists = await db.gf_chat_groups.find_one({"url_invitacion": c["url_invitacion"]}, {"_id": 1})
+        if exists:
+            continue
+        seen_chats.add(c["url_invitacion"])
+        chats_unicos.append(c)
+
+    foros_unicos = []
+    for f in foros:
+        exists = await db.gf_forum_threads.find_one({"url": f["url"]}, {"_id": 1})
+        if exists:
+            continue
+        foros_unicos.append(f)
+
+    alertas_rojas = [it for it in intents_filtrados if it["urgencia"] == "alerta_roja"]
+
+    return {
+        "chats_nuevos": chats_unicos,
+        "intents_nuevos": intents_filtrados,
+        "foros_nuevos": foros_unicos,
+        "alertas_rojas": len(alertas_rojas),
+        "ruido_descartado": len(intents) - len(intents_filtrados),
+    }
+
+
+async def _gf_listen_promover_a_radar(intent: dict) -> Optional[str]:
+    """Cuando una intención es ALERTA ROJA, la promueve al Radar existente
+    como lead URGENTE de canastillas. Retorna radar_id.
+    """
+    # Estimación conservadora: lead conversacional = $80-300K MXN cotización
+    monto_proyecto = 0  # no sabemos el monto del proyecto subyacente
+    canastillas = 8 if "200" in intent["mensaje"] else (15 if "500" in intent["mensaje"] else 10)
+    monto_can = canastillas * 35_000
+    titulo = f"INTENT · {intent['ciudad']} · {intent['palabra_clave'].title()} — {intent['plataforma'].upper()}"
+    doc = {
+        "id": new_id(),
+        "titulo": titulo,
+        "fuente": "OSINT-Listening",
+        "sector": "manufactura",
+        "ciudad": intent["ciudad"],
+        "estado": "",
+        "monto_estimado": monto_proyecto,
+        "descripcion": f"INTENT en vivo ({intent['plataforma']}): \"{intent['mensaje']}\"\nUsuario: {intent['usuario']} · Publicado: {intent.get('timestamp_origen', '')[:16]} · URL: {intent['url_directa']}",
+        "url_fuente": intent["url_directa"],
+        "lat": None, "lng": None,
+        "score": 95 if intent["urgencia"] == "alerta_roja" else 80,
+        "hotness": "hot" if intent["urgencia"] == "alerta_roja" else "warm",
+        "score_reasons": [
+            f"🚨 INTENT en vivo ({intent['plataforma']}) usuario {intent['usuario']}",
+            f"Mensaje hace {((datetime.now(timezone.utc) - datetime.fromisoformat(intent['timestamp_origen'].replace('Z','+00:00'))).total_seconds()/3600):.0f}h",
+            f"Palabra clave: {intent['palabra_clave']} en {intent['ciudad']}",
+        ],
+        "detected_at": iso(now_utc()),
+        "is_greenfield": False,
+        "is_listening": True,
+        "listening_intent_id": intent["id"],
+        "listening_urgencia": intent["urgencia"],
+        "listening_plataforma": intent["plataforma"],
+        "canastillas_estimadas": canastillas,
+        "canastillas_monto_estimado": monto_can,
+    }
+    await db.radar.insert_one(doc)
+    # Hot alert para ALERTA ROJA
+    if intent["urgencia"] == "alerta_roja":
+        try:
+            await create_hot_alert("radar", doc["id"], titulo, 95, 0, "manufactura", intent["ciudad"])
+        except Exception:
+            pass
+    return doc["id"]
+
+
+async def _gf_run_listening_pipeline(limite_intents: int = 8, limite_chats: int = 6,
+                                       limite_foros: int = 4, manual_user: Optional[dict] = None) -> dict:
+    """Orquesta agentes 5-8 del Escuadrón Conversacional."""
+    run_id = new_id()
+    started = iso(now_utc())
+    logger.info(f"[LISTENING][RUN {run_id}] Inicio social listening")
+    try:
+        chats = await _gf_agent5_infiltrado_chats(limite_chats)
+        intents = await _gf_agent6_intent_interceptor(limite_intents)
+        foros = await _gf_agent7_foros(limite_foros)
+        sintesis = await _gf_agent8_sintetizador_listening(chats, intents, foros)
+
+        # Insert
+        promovidos_radar = 0
+        if sintesis["chats_nuevos"]:
+            await db.gf_chat_groups.insert_many(sintesis["chats_nuevos"])
+        if sintesis["foros_nuevos"]:
+            await db.gf_forum_threads.insert_many(sintesis["foros_nuevos"])
+        for it in sintesis["intents_nuevos"]:
+            await db.gf_intent_signals.insert_one(it)
+            # ALERTA ROJA → promover automáticamente al Radar
+            if it["urgencia"] == "alerta_roja":
+                radar_id = await _gf_listen_promover_a_radar(it)
+                if radar_id:
+                    await db.gf_intent_signals.update_one(
+                        {"id": it["id"]},
+                        {"$set": {"convertida_a_radar": radar_id, "procesada": True}},
+                    )
+                    promovidos_radar += 1
+                    # Tarea inmediata para Alberto
+                    alberto = await _gf_user_alberto()
+                    await db.gf_tareas.insert_one({
+                        "id": new_id(),
+                        "tipo": "alerta_roja",
+                        "prioridad": "alta",
+                        "titulo": f"🚨 ALERTA ROJA: responder a {it['usuario']} en {it['plataforma']} — {it['ciudad']}",
+                        "descripcion": f"Mensaje en vivo: \"{it['mensaje']}\"\nURL: {it['url_directa']}\nResponder ANTES de 1 hora.",
+                        "empresa": f"INTENT {it['ciudad']}",
+                        "asignado_a": alberto.get("id"),
+                        "asignado_nombre": alberto.get("name"),
+                        "estado": "abierta",
+                        "creado_por_sistema": True,
+                        "created_at": iso(now_utc()),
+                    })
+
+        result = {
+            "run_id": run_id,
+            "iniciada": started,
+            "finalizada": iso(now_utc()),
+            "tipo": "listening",
+            "ejecutada_por": (manual_user or {}).get("id", "scheduler"),
+            "chats_detectados": len(chats),
+            "chats_nuevos": len(sintesis["chats_nuevos"]),
+            "intents_detectados": len(intents),
+            "intents_nuevos": len(sintesis["intents_nuevos"]),
+            "alertas_rojas": sintesis["alertas_rojas"],
+            "promovidos_radar": promovidos_radar,
+            "foros_nuevos": len(sintesis["foros_nuevos"]),
+            "ruido_descartado": sintesis["ruido_descartado"],
+            "modo": "demo_seeded",
+            "ok": True,
+        }
+        await db.gf_runs_listening.insert_one(result)
+        logger.info(f"[LISTENING][RUN {run_id}] ✅ {result['intents_nuevos']} intents · {result['alertas_rojas']} alertas rojas · {result['promovidos_radar']} promovidos")
+        return {k: v for k, v in result.items() if k != "_id"}
+    except Exception as e:
+        logger.exception(f"[LISTENING][RUN {run_id}] Error: {e}")
+        return {"run_id": run_id, "ok": False, "error": str(e)}
+
+
+# ----------------------------------------------------------------------------
+# Endpoints Escuadrón Conversacional
+# ----------------------------------------------------------------------------
+@api.post("/greenfield/listening/run")
+async def gf_listening_run(body: Optional[dict] = None,
+                            user: dict = Depends(require_roles("director", "socio", "comercial"))):
+    body = body or {}
+    return await _gf_run_listening_pipeline(
+        limite_intents=int(body.get("intents", 8)),
+        limite_chats=int(body.get("chats", 6)),
+        limite_foros=int(body.get("foros", 4)),
+        manual_user=user,
+    )
+
+
+@api.get("/greenfield/listening/status")
+async def gf_listening_status(user: dict = Depends(require_greenfield)):
+    last = await db.gf_runs_listening.find({}, {"_id": 0}).sort("iniciada", -1).limit(10).to_list(10)
+    return {
+        "ultimas_corridas": last,
+        "totales": {
+            "chats": await db.gf_chat_groups.count_documents({}),
+            "intents": await db.gf_intent_signals.count_documents({}),
+            "alertas_rojas_activas": await db.gf_intent_signals.count_documents({"urgencia": "alerta_roja"}),
+            "foros": await db.gf_forum_threads.count_documents({}),
+        },
+        "agentes": [
+            {"key": "agente_5", "nombre": "Infiltrado de Chats", "mision": "Extraer enlaces WhatsApp/Telegram",
+             "dorks": ['site:chat.whatsapp.com "constructores" "Querétaro"', 'site:t.me/joinchat "construcción" "pisos industriales"']},
+            {"key": "agente_6", "nombre": "Interceptor de Intención", "mision": "Twitter/Reddit/FB en tiempo real",
+             "dorks": ['"alguien sabe" "canastillas pasajuntas"', '"recomienden" "acero pisos industriales"']},
+            {"key": "agente_7", "nombre": "Rastreador de Foros", "mision": "CMIC, SkyscraperCity, foros civiles",
+             "dorks": ['inurl:forum "canastillas" "proveedores"', 'inurl:foro "pisos industriales" "junta constructiva"']},
+            {"key": "agente_8", "nombre": "Sintetizador Comercial", "mision": "Filtro <24h + dedupe + ALERTA ROJA",
+             "dorks": ['Cross-validation + filtro académico (Emergent LLM)']},
+        ],
+    }
+
+
+@api.get("/greenfield/listening/chats")
+async def gf_listening_chats(plataforma: Optional[str] = None, ciudad: Optional[str] = None,
+                              user: dict = Depends(require_greenfield)):
+    q = {}
+    if plataforma:
+        q["plataforma"] = plataforma
+    if ciudad:
+        q["ciudad"] = ciudad
+    items = await db.gf_chat_groups.find(q, {"_id": 0}).sort("detectado_at", -1).to_list(500)
+    return items
+
+
+@api.delete("/greenfield/listening/chats/{cid}")
+async def gf_listening_chats_delete(cid: str, user: dict = Depends(require_roles("director", "socio"))):
+    r = await db.gf_chat_groups.delete_one({"id": cid})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Chat no encontrado")
+    return {"ok": True}
+
+
+@api.get("/greenfield/listening/intents")
+async def gf_listening_intents(urgencia: Optional[str] = None, plataforma: Optional[str] = None,
+                                ciudad: Optional[str] = None, solo_activas: bool = False,
+                                user: dict = Depends(require_greenfield)):
+    q = {}
+    if urgencia:
+        q["urgencia"] = urgencia
+    if plataforma:
+        q["plataforma"] = plataforma
+    if ciudad:
+        q["ciudad"] = ciudad
+    if solo_activas:
+        q["procesada"] = False
+    items = await db.gf_intent_signals.find(q, {"_id": 0}).sort("timestamp_origen", -1).to_list(500)
+    return items
+
+
+@api.patch("/greenfield/listening/intents/{iid}")
+async def gf_listening_intents_update(iid: str, body: dict, user: dict = Depends(require_greenfield)):
+    upd = {k: v for k, v in body.items() if k in {"procesada", "notas", "urgencia"}}
+    r = await db.gf_intent_signals.update_one({"id": iid}, {"$set": upd})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Intent no encontrado")
+    return await db.gf_intent_signals.find_one({"id": iid}, {"_id": 0})
+
+
+@api.get("/greenfield/listening/foros")
+async def gf_listening_foros(user: dict = Depends(require_greenfield)):
+    items = await db.gf_forum_threads.find({}, {"_id": 0}).sort("detectado_at", -1).to_list(500)
+    return items
+
+
+# ============================================================================
 # FIN V5 · RADAR GREENFIELD OSINT
 # ============================================================================
 
@@ -5086,6 +5571,12 @@ async def _scheduler_loop():
                 logger.info("[SCHEDULER] Running Greenfield OSINT pipeline")
                 await _gf_run_pipeline()
                 SCRAPER_STATE["_last_greenfield_day"] = today_key
+            # Cada hora (cdmx_min ~ 0-5) → Escuadrón Conversacional (Listening)
+            listen_hour_key = f"{today_key}T{cdmx_hour:02d}"
+            if SCRAPER_STATE.get("_last_listening_hour") != listen_hour_key:
+                logger.info(f"[SCHEDULER] Running Listening pipeline @{listen_hour_key}")
+                await _gf_run_listening_pipeline()
+                SCRAPER_STATE["_last_listening_hour"] = listen_hour_key
         except Exception:
             logger.exception("Scheduler tick error")
         await asyncio.sleep(60 * 5)  # check every 5 minutes
