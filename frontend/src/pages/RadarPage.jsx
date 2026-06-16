@@ -1,16 +1,24 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api, fmtMXN, formatApiError, SECTOR_LABEL } from "../lib/auth";
 import { Hotness, ScoreBar, Modal } from "../components/ui-deyma";
-import { Sparkles, ExternalLink, Filter, Radar as RadarIcon, ArrowRightCircle } from "lucide-react";
+import { Sparkles, ExternalLink, Filter, Radar as RadarIcon, ArrowRightCircle, Satellite, Package, Zap, RefreshCw } from "lucide-react";
 
-const SOURCE_LABEL = { licitacion: "Licitación", noticia: "Noticia", referencia: "Referencia", prospeccion: "Prospección" };
+const SOURCE_LABEL = { licitacion: "Licitación", noticia: "Noticia", referencia: "Referencia", prospeccion: "Prospección", "OSINT-Greenfield": "OSINT-Greenfield" };
+
+const URGENCIA_BADGE = {
+  alto: { color: "bg-rose-500 text-white", label: "URGENCIA ALTA" },
+  medio: { color: "bg-amber-500 text-black", label: "URGENCIA MEDIA" },
+  bajo: { color: "bg-zinc-500 text-white", label: "URGENCIA BAJA" },
+};
 
 export default function RadarPage() {
   const [items, setItems] = useState([]);
   const [empresas, setEmpresas] = useState([]);
   const [sector, setSector] = useState("todos");
+  const [filtroGF, setFiltroGF] = useState("todos"); // todos | solo_greenfield | sin_greenfield
   const [scoring, setScoring] = useState(null);
   const [importTarget, setImportTarget] = useState(null);
+  const [syncing, setSyncing] = useState(false);
 
   const load = async () => {
     const [{ data }, { data: emp }] = await Promise.all([api.get("/radar"), api.get("/empresas")]);
@@ -19,9 +27,27 @@ export default function RadarPage() {
   useEffect(() => { load(); }, []);
 
   const filtered = useMemo(() => {
-    const list = sector === "todos" ? items : items.filter((p) => p.sector === sector);
-    return [...list].sort((a, b) => (b.score || 0) - (a.score || 0));
-  }, [items, sector]);
+    let list = sector === "todos" ? items : items.filter((p) => p.sector === sector);
+    if (filtroGF === "solo_greenfield") list = list.filter((p) => p.is_greenfield);
+    if (filtroGF === "sin_greenfield") list = list.filter((p) => !p.is_greenfield);
+    return [...list].sort((a, b) => {
+      // Greenfield URGENTE primero, luego score
+      const ag = a.is_greenfield && a.greenfield_urgencia === "alto" ? 1000 : 0;
+      const bg = b.is_greenfield && b.greenfield_urgencia === "alto" ? 1000 : 0;
+      return (bg + (b.score || 0)) - (ag + (a.score || 0));
+    });
+  }, [items, sector, filtroGF]);
+
+  // Métricas Greenfield → Pipeline canastillas
+  const gfStats = useMemo(() => {
+    const gf = items.filter((p) => p.is_greenfield);
+    return {
+      total: gf.length,
+      altas: gf.filter((p) => p.greenfield_urgencia === "alto").length,
+      piezas: gf.reduce((s, p) => s + (p.canastillas_estimadas || 0), 0),
+      monto: gf.reduce((s, p) => s + (p.canastillas_monto_estimado || 0), 0),
+    };
+  }, [items]);
 
   const scoreOne = async (id) => {
     setScoring(id);
@@ -34,19 +60,65 @@ export default function RadarPage() {
     await load();
   };
 
+  const resyncGreenfield = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      const { data } = await api.post("/greenfield/resincronizar-radar");
+      alert(`✓ Sincronizado: ${data.proyectadas_nuevas} nuevas, ${data.actualizadas} actualizadas`);
+      await load();
+    } catch (e) { alert(formatApiError(e)); }
+    finally { setSyncing(false); }
+  };
+
   return (
     <div className="p-6 space-y-5" data-testid="radar-page">
-      <div className="divider pb-4 flex items-end justify-between">
+      <div className="divider pb-4 flex items-end justify-between flex-wrap gap-3">
         <div>
-          <div className="label-overline text-amber-400">Inteligencia de Mercado · Bajío</div>
+          <div className="label-overline text-amber-400">Inteligencia de Mercado · Bajío · Canastillas Industriales</div>
           <h1 className="text-3xl font-black tracking-tight" style={{ fontFamily: "Chivo, sans-serif" }}>Radar de Proyectos</h1>
         </div>
-        <button data-testid="score-all-btn" onClick={scoreAll} className="btn-primary flex items-center gap-2"><Sparkles size={14} strokeWidth={2}/> Calificar pendientes</button>
+        <div className="flex items-center gap-2">
+          <button data-testid="radar-resync-greenfield" onClick={resyncGreenfield} disabled={syncing}
+                  className="text-xs border border-emerald-500/60 text-emerald-400 hover:bg-emerald-500/10 px-3 py-2 flex items-center gap-2 font-bold uppercase tracking-wider"
+                  style={{ fontFamily: "Chivo, sans-serif" }}>
+            <RefreshCw size={12} strokeWidth={2} className={syncing ? "animate-spin" : ""}/>
+            {syncing ? "Sincronizando…" : "Sincronizar Greenfield"}
+          </button>
+          <button data-testid="score-all-btn" onClick={scoreAll} className="btn-primary flex items-center gap-2"><Sparkles size={14} strokeWidth={2}/> Calificar pendientes</button>
+        </div>
       </div>
+
+      {/* Métricas Greenfield → Canastillas */}
+      {gfStats.total > 0 && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3" data-testid="radar-gf-metrics">
+          <div className="surface p-3 border-l-2 border-emerald-500">
+            <div className="flex items-center gap-2"><Satellite size={12} className="text-emerald-400"/><div className="label-overline text-[10px]">Leads Greenfield</div></div>
+            <div className="text-2xl font-black font-mono text-emerald-400 mt-1">{gfStats.total}</div>
+          </div>
+          <div className="surface p-3 border-l-2 border-rose-500">
+            <div className="flex items-center gap-2"><Zap size={12} className="text-rose-400"/><div className="label-overline text-[10px]">Urgencia ALTA</div></div>
+            <div className="text-2xl font-black font-mono text-rose-400 mt-1">{gfStats.altas}</div>
+          </div>
+          <div className="surface p-3 border-l-2 border-sky-500">
+            <div className="flex items-center gap-2"><Package size={12} className="text-sky-400"/><div className="label-overline text-[10px]">Canastillas estimadas</div></div>
+            <div className="text-2xl font-black font-mono text-sky-400 mt-1">{gfStats.piezas}</div>
+          </div>
+          <div className="surface p-3 border-l-2 border-amber-500">
+            <div className="flex items-center gap-2"><div className="text-amber-400 text-sm">$</div><div className="label-overline text-[10px]">Ingreso 12m</div></div>
+            <div className="text-2xl font-black font-mono text-amber-400 mt-1">{fmtMXN(gfStats.monto)}</div>
+          </div>
+        </div>
+      )}
 
       <div className="surface p-3 flex items-center gap-3 flex-wrap">
         <Filter size={14} className="text-zinc-500" strokeWidth={1.5}/>
         <span className="label-overline">Filtros</span>
+        <select data-testid="radar-gf-filter" className="input-field !w-auto text-xs" value={filtroGF} onChange={(e) => setFiltroGF(e.target.value)}>
+          <option value="todos">Todos los proyectos</option>
+          <option value="solo_greenfield">🛰️ Solo Greenfield OSINT</option>
+          <option value="sin_greenfield">Solo radar tradicional</option>
+        </select>
         <select data-testid="radar-sector-filter" className="input-field max-w-xs" value={sector} onChange={(e) => setSector(e.target.value)}>
           <option value="todos">Todos los sectores</option>
           {Object.entries(SECTOR_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
@@ -55,25 +127,55 @@ export default function RadarPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-        {filtered.map((p) => (
-          <div key={p.id} className="surface flex flex-col" data-testid={`radar-card-${p.id}`}>
+        {filtered.map((p) => {
+          const isGF = p.is_greenfield;
+          const urg = isGF && p.greenfield_urgencia ? URGENCIA_BADGE[p.greenfield_urgencia] : null;
+          return (
+          <div key={p.id} className={`surface flex flex-col relative ${isGF ? "ring-1 ring-emerald-500/40" : ""}`} data-testid={`radar-card-${p.id}`}>
+            {/* Banderín GREENFIELD */}
+            {isGF && (
+              <div className="absolute top-0 right-0 z-10 bg-emerald-500 text-black font-black text-[9px] tracking-widest px-2 py-1 flex items-center gap-1"
+                   style={{ fontFamily: "Chivo, sans-serif" }} data-testid={`radar-gf-badge-${p.id}`}>
+                <Satellite size={10} /> GREENFIELD OSINT
+              </div>
+            )}
             <div className="relative h-32 overflow-hidden border-b border-white/10">
               <img src={p.score >= 75 ? "https://images.unsplash.com/photo-1623428454599-0b106ed85f67" : "https://images.pexels.com/photos/25461690/pexels-photo-25461690.jpeg"}
                    alt={p.titulo} className="absolute inset-0 w-full h-full object-cover opacity-40" />
               <div className="absolute inset-0 bg-gradient-to-t from-black via-black/30 to-transparent" />
-              <div className="absolute top-3 left-3 flex items-center gap-2">
+              <div className="absolute top-3 left-3 flex items-center gap-2 flex-wrap">
                 <Hotness value={p.hotness} />
                 <span className="badge text-zinc-300 border-zinc-400/40">{SOURCE_LABEL[p.fuente] || p.fuente}</span>
+                {urg && (
+                  <span className={`text-[8px] font-black tracking-widest px-1.5 py-0.5 ${urg.color}`}
+                        data-testid={`radar-gf-urg-${p.id}`}>
+                    {urg.label}
+                  </span>
+                )}
               </div>
               <div className="absolute bottom-2 right-3 font-mono text-xs text-amber-400">{p.ciudad}, {p.estado}</div>
             </div>
             <div className="p-4 flex-1 flex flex-col gap-3">
               <h3 className="text-sm font-bold leading-tight">{p.titulo}</h3>
               <div className="label-overline text-zinc-400">{SECTOR_LABEL[p.sector]}</div>
+              {/* Banner CANASTILLAS para Greenfield */}
+              {isGF && p.canastillas_estimadas > 0 && (
+                <div className="bg-emerald-500/10 border border-emerald-500/30 p-2 flex items-center justify-between" data-testid={`radar-canastillas-${p.id}`}>
+                  <div className="flex items-center gap-2">
+                    <Package size={12} className="text-emerald-400" />
+                    <span className="text-xs font-mono text-emerald-300">
+                      <span className="text-emerald-400 font-bold">{p.canastillas_estimadas}</span> canastillas / 12m
+                    </span>
+                  </div>
+                  <span className="text-xs font-mono text-emerald-400 font-bold">
+                    {fmtMXN(p.canastillas_monto_estimado)}
+                  </span>
+                </div>
+              )}
               <p className="text-xs text-zinc-400 line-clamp-3">{p.descripcion}</p>
               <div className="mt-auto space-y-2">
                 <div className="flex items-baseline justify-between">
-                  <span className="label-overline">Monto estimado</span>
+                  <span className="label-overline">Monto proyecto</span>
                   <span className="font-mono text-amber-400 text-base">{fmtMXN(p.monto_estimado)}</span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -85,19 +187,25 @@ export default function RadarPage() {
                     {p.score_reasons.slice(0, 3).map((r, i) => <li key={i} className="terminal-line">{r}</li>)}
                   </ul>
                 )}
-                <div className="flex items-center gap-2 pt-2">
+                <div className="flex items-center gap-2 pt-2 flex-wrap">
                   <button data-testid={`radar-score-btn-${p.id}`} onClick={() => scoreOne(p.id)} disabled={scoring === p.id} className="btn-ghost text-[10px] flex items-center gap-1">
                     <Sparkles size={11} strokeWidth={2}/> {scoring === p.id ? "Calificando…" : "Calificar IA"}
                   </button>
-                  <button data-testid={`radar-import-btn-${p.id}`} onClick={() => setImportTarget(p)} className="text-[10px] px-2 py-1 border border-amber-500/60 text-amber-400 hover:bg-amber-500/10 flex items-center gap-1 font-bold uppercase tracking-wider" style={{ fontFamily: "Chivo, sans-serif" }}>
+                  <button data-testid={`radar-import-btn-${p.id}`} onClick={() => setImportTarget(p)} className={`text-[10px] px-2 py-1 border flex items-center gap-1 font-bold uppercase tracking-wider ${isGF ? "border-emerald-500/60 text-emerald-400 hover:bg-emerald-500/10" : "border-amber-500/60 text-amber-400 hover:bg-amber-500/10"}`} style={{ fontFamily: "Chivo, sans-serif" }}>
                     <ArrowRightCircle size={11} strokeWidth={2}/> Importar al CRM
                   </button>
-                  {p.url_fuente && <a href={`https://${p.url_fuente.replace(/^https?:\/\//, "")}`} target="_blank" rel="noreferrer" className="text-[10px] text-sky-400 hover:text-sky-300 flex items-center gap-1 ml-auto"><ExternalLink size={10}/>{p.url_fuente}</a>}
+                  {isGF && (
+                    <a href="/admin/radar-greenfield" className="text-[10px] text-emerald-400 hover:text-emerald-300 flex items-center gap-1" title="Ver embudo Greenfield">
+                      <Satellite size={10}/> Embudo OSINT
+                    </a>
+                  )}
+                  {p.url_fuente && <a href={`https://${p.url_fuente.replace(/^https?:\/\//, "")}`} target="_blank" rel="noreferrer" className="text-[10px] text-sky-400 hover:text-sky-300 flex items-center gap-1 ml-auto"><ExternalLink size={10}/>fuente</a>}
                 </div>
               </div>
             </div>
           </div>
-        ))}
+          );
+        })}
         {filtered.length === 0 && (
           <div className="col-span-full surface p-12 text-center">
             <RadarIcon size={40} strokeWidth={1} className="mx-auto text-zinc-700 mb-3"/>

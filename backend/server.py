@@ -212,6 +212,13 @@ class ProyectoRadar(ProyectoRadarIn):
     hotness: Hotness = "cold"
     score_reasons: List[str] = []
     detected_at: str
+    # === V5 · Integración Greenfield OSINT (Canastillas Industriales) ===
+    is_greenfield: bool = False
+    greenfield_urgencia: Optional[Literal["alto", "medio", "bajo"]] = None
+    greenfield_origen: Optional[str] = None  # MIA, LinkedIn, ParqueIndustrial, etc.
+    greenfield_senal_id: Optional[str] = None  # FK a senales_greenfield
+    canastillas_estimadas: Optional[int] = None  # piezas/mes estimadas
+    canastillas_monto_estimado: Optional[float] = None  # MXN ingreso 12 meses
 
 
 class CotizacionItem(BaseModel):
@@ -4757,6 +4764,110 @@ async def _gf_agent3_datos_profundos(contactos: List[dict]) -> List[dict]:
     return enriched
 
 
+_GF_SECTOR_MAP = {
+    "Automotriz": "manufactura",
+    "Aeroespacial": "manufactura",
+    "Electrónica": "nearshoring",
+    "Logística/CEDIS": "cedis_logistica",
+    "Data Center": "data_centers",
+    "Alimentos": "manufactura",
+    "Farmacéutica": "manufactura",
+    "Manufactura": "manufactura",
+}
+
+
+def _gf_estimar_canastillas(monto_proyecto: float, sector: str) -> Tuple[int, float]:
+    """Heurística de canastillas para una planta nueva.
+    Greenfield = 6-18 meses de construcción + acabados + commissioning.
+    Aprox. 1 canastilla por cada $4M MXN de proyecto.
+    Mix renta/venta: precio promedio $35,000 MXN/canastilla (incluye renta 12m + venta 30%).
+    """
+    if not monto_proyecto:
+        return 0, 0.0
+    base_count = max(8, int(monto_proyecto / 4_000_000))
+    # Factor de intensidad según sector (data centers + aero usan más altura)
+    factor = {"Data Center": 1.4, "Aeroespacial": 1.5, "Manufactura": 1.0,
+              "Automotriz": 1.2, "Electrónica": 0.9, "Logística/CEDIS": 1.1,
+              "Alimentos": 0.8, "Farmacéutica": 1.0}.get(sector, 1.0)
+    piezas = int(base_count * factor)
+    monto_can = piezas * 35_000
+    return piezas, float(monto_can)
+
+
+async def _gf_proyectar_a_radar(senal: dict) -> Optional[dict]:
+    """Crea/actualiza un registro en db.radar a partir de una señal Greenfield.
+    Marca el item como is_greenfield=True para que aparezca con badge en /radar.
+    """
+    # Anti-duplicado: misma empresa + ciudad
+    existing = await db.radar.find_one(
+        {"is_greenfield": True, "titulo": {"$regex": senal["empresa"], "$options": "i"},
+         "ciudad": senal.get("ciudad", "")},
+        {"_id": 0, "id": 1},
+    )
+    if existing:
+        # Actualizar urgencia/monto si cambió
+        piezas, monto_can = _gf_estimar_canastillas(senal.get("monto_estimado") or 0, senal.get("sector_industrial") or "")
+        await db.radar.update_one(
+            {"id": existing["id"]},
+            {"$set": {
+                "greenfield_urgencia": senal.get("urgencia"),
+                "canastillas_estimadas": piezas,
+                "canastillas_monto_estimado": monto_can,
+            }},
+        )
+        return existing
+    sector_can = _GF_SECTOR_MAP.get(senal.get("sector_industrial") or "", "otro")
+    piezas, monto_can = _gf_estimar_canastillas(senal.get("monto_estimado") or 0, senal.get("sector_industrial") or "")
+    # Score automático: greenfield urgente = HOT inmediato
+    urg = senal.get("urgencia", "medio")
+    score = {"alto": 92, "medio": 78, "bajo": 60}.get(urg, 70)
+    hot = "hot" if score >= 85 else ("warm" if score >= 70 else "cold")
+    titulo = f"GREENFIELD · {senal['empresa']} · Canastillas {piezas} pzas"
+    desc = (
+        f"Planta NUEVA detectada por OSINT. Sector: {senal.get('sector_industrial','')}. "
+        f"Origen señal: {senal.get('origen','')}. "
+        f"Estimado de canastillas: {piezas} piezas/12 meses (~${monto_can:,.0f} MXN). "
+        f"Urgencia: {urg.upper()}. "
+        f"Notas: {senal.get('notas','')}"
+    )
+    doc = {
+        "id": new_id(),
+        "titulo": titulo,
+        "fuente": "OSINT-Greenfield",
+        "sector": sector_can,
+        "ciudad": senal.get("ciudad", ""),
+        "estado": senal.get("estado_mx", ""),
+        "monto_estimado": senal.get("monto_estimado") or 0,
+        "descripcion": desc,
+        "url_fuente": senal.get("url_referencia"),
+        "lat": None,
+        "lng": None,
+        "score": score,
+        "hotness": hot,
+        "score_reasons": [
+            f"OSINT detectó Greenfield {urg.upper()} en {senal.get('ciudad','')}",
+            f"Estimación: {piezas} canastillas/12 meses (~${monto_can/1000:,.0f}K MXN)",
+            f"Origen: {senal.get('origen','')} ({senal.get('agente_origen','')})",
+        ],
+        "detected_at": iso(now_utc()),
+        "is_greenfield": True,
+        "greenfield_urgencia": urg,
+        "greenfield_origen": senal.get("origen"),
+        "greenfield_senal_id": senal["id"],
+        "canastillas_estimadas": piezas,
+        "canastillas_monto_estimado": monto_can,
+    }
+    await db.radar.insert_one(doc)
+    # Si urgencia alta → crear HOT alert
+    if urg == "alto":
+        try:
+            await create_hot_alert("radar", doc["id"], titulo, score,
+                                    doc["monto_estimado"], sector_can, doc["ciudad"])
+        except Exception as e:
+            logger.warning(f"[GREENFIELD] hot alert fail: {e}")
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+
 async def _gf_agent4_sintetizador(senales: List[dict], contactos: List[dict]) -> dict:
     """AGENTE 4: Sintetizador.
     Dedupe por (empresa+ciudad), descarta contactos sin email Y sin tel,
@@ -4808,9 +4919,16 @@ async def _gf_run_pipeline(target_estados: List[str] = None, limite_senales: int
         # Agente 4
         sintesis = await _gf_agent4_sintetizador(senales_raw, contactos_enriched)
 
-        # Insertar señales validadas
+        # Insertar señales validadas + proyectar al Radar existente (canastillas)
+        proyectadas_radar = 0
         if sintesis["senales_unicas"]:
             await db.senales_greenfield.insert_many(sintesis["senales_unicas"])
+            for s in sintesis["senales_unicas"]:
+                try:
+                    await _gf_proyectar_a_radar(s)
+                    proyectadas_radar += 1
+                except Exception as e:
+                    logger.warning(f"[GREENFIELD] proyección radar fail: {e}")
         # Insertar contactos validados y disparar Workflow A (auto-triangulación)
         for c in sintesis["contactos_validos"]:
             await db.contactos_osint.insert_one(c)
@@ -4824,6 +4942,7 @@ async def _gf_run_pipeline(target_estados: List[str] = None, limite_senales: int
             "target_estados": target_estados,
             "senales_detectadas": len(senales_raw),
             "senales_nuevas_insertadas": len(sintesis["senales_unicas"]),
+            "senales_proyectadas_radar": proyectadas_radar,
             "duplicados_descartados": sintesis["duplicados_descartados"],
             "contactos_detectados": len(contactos_raw),
             "contactos_validados": len(sintesis["contactos_validos"]),
@@ -4852,6 +4971,27 @@ async def gf_agentes_run(body: Optional[dict] = None,
     estados = body.get("estados") or ["Querétaro", "Guanajuato", "Estado de México"]
     limite = int(body.get("limite", 5))
     return await _gf_run_pipeline(target_estados=estados, limite_senales=limite, manual_user=user)
+
+
+@api.post("/greenfield/resincronizar-radar")
+async def gf_resync_radar(user: dict = Depends(require_roles("director", "socio"))):
+    """Proyecta todas las señales Greenfield existentes al Radar de Proyectos
+    (canastillas industriales). Útil para sincronizar señales pre-existentes
+    que no se habían proyectado.
+    """
+    senales = await db.senales_greenfield.find({}, {"_id": 0}).to_list(2000)
+    proyectadas = 0
+    actualizadas = 0
+    for s in senales:
+        existing = await db.radar.find_one(
+            {"greenfield_senal_id": s["id"]}, {"_id": 0, "id": 1},
+        )
+        await _gf_proyectar_a_radar(s)
+        if existing:
+            actualizadas += 1
+        else:
+            proyectadas += 1
+    return {"total_senales": len(senales), "proyectadas_nuevas": proyectadas, "actualizadas": actualizadas}
 
 
 @api.get("/greenfield/agentes/status")
