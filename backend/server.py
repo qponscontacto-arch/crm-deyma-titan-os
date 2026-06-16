@@ -1155,8 +1155,20 @@ async def convertir_a_obra(oid: str, body: ConvertirObraIn, user: dict = Depends
 # ----------------------------------------------------------------------------
 # V2: Importar proyecto del Radar al CRM como Oportunidad
 # ----------------------------------------------------------------------------
+class NuevaEmpresaRadarIn(BaseModel):
+    nombre: str
+    rfc: Optional[str] = None
+    sitio_web: Optional[str] = None
+    notas: Optional[str] = None
+    contacto_nombre: Optional[str] = None
+    contacto_puesto: Optional[str] = None
+    contacto_email: Optional[str] = None
+    contacto_telefono: Optional[str] = None
+
+
 class ImportarRadarIn(BaseModel):
-    empresa_id: str
+    empresa_id: Optional[str] = None
+    nueva_empresa: Optional[NuevaEmpresaRadarIn] = None
     probabilidad: int = 25
     stage: Stage = "prospeccion"
 
@@ -1166,12 +1178,48 @@ async def importar_radar(rid: str, body: ImportarRadarIn, user: dict = Depends(g
     p = await db.radar.find_one({"id": rid}, {"_id": 0})
     if not p:
         raise HTTPException(status_code=404, detail="Proyecto radar no encontrado")
-    emp = await db.empresas.find_one({"id": body.empresa_id}, {"_id": 0})
-    if not emp:
-        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+
+    # Resolución de empresa: ya existente o creación on-the-fly
+    if body.empresa_id:
+        emp = await db.empresas.find_one({"id": body.empresa_id}, {"_id": 0})
+        if not emp:
+            raise HTTPException(status_code=404, detail="Empresa no encontrada")
+        empresa_id = body.empresa_id
+    elif body.nueva_empresa and body.nueva_empresa.nombre.strip():
+        ne = body.nueva_empresa
+        # Toma sector/ciudad/estado del radar para sembrar la empresa
+        emp_doc = {
+            "id": new_id(),
+            "nombre": ne.nombre.strip(),
+            "rfc": (ne.rfc or "").strip() or None,
+            "sector": p.get("sector", "infraestructura"),
+            "ciudad": p.get("ciudad", "Querétaro"),
+            "estado": p.get("estado", "Querétaro"),
+            "sitio_web": (ne.sitio_web or "").strip() or None,
+            "notas": (ne.notas or "").strip() or None,
+            "lat": p.get("lat"),
+            "lng": p.get("lng"),
+            "created_at": iso(now_utc()),
+        }
+        await db.empresas.insert_one(emp_doc)
+        empresa_id = emp_doc["id"]
+        # Contacto principal (opcional)
+        if (ne.contacto_nombre or "").strip():
+            await db.contactos.insert_one({
+                "id": new_id(),
+                "empresa_id": empresa_id,
+                "nombre": ne.contacto_nombre.strip(),
+                "puesto": (ne.contacto_puesto or "").strip() or None,
+                "email": (ne.contacto_email or "").strip() or None,
+                "telefono": (ne.contacto_telefono or "").strip() or None,
+                "created_at": iso(now_utc()),
+            })
+    else:
+        raise HTTPException(status_code=400, detail="Debes seleccionar una empresa del CRM o capturar una empresa nueva.")
+
     op = {
         "id": new_id(),
-        "empresa_id": body.empresa_id,
+        "empresa_id": empresa_id,
         "titulo": p["titulo"],
         "sector": p["sector"],
         "descripcion": p["descripcion"],
