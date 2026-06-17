@@ -4841,45 +4841,74 @@ async def _gf_agent2_talento_linkedin(senales: List[dict], por_empresa: int = 2)
     LIVE: Apollo.io people search por título + organización.
     DEMO: genera contactos realistas asociados a las señales del Agente 1.
     """
-    # === MODO LIVE (Apollo) ===
-    if _osint_live_mode() and APOLLO_API_KEY:
+    # === MODO LIVE (Apify LinkedIn SERP + Hunter pattern) ===
+    if _osint_live_mode() and APIFY_TOKEN:
         out = []
+        from urllib.parse import urlparse
         for s in senales:
-            people = await _apollo_people_search(
-                titles=["Plant Manager", "NPI Manager", "Gerente de Lanzamiento",
-                        "Construction Manager", "Site Manager", "Director de Operaciones"],
-                locations=["Mexico"],
-                industries=["construction", "manufacturing", "automotive", "aerospace"],
-                per_page=por_empresa * 3,
+            ciudad = s.get("ciudad", "México")
+            empresa_words = [w for w in s["empresa"].split() if len(w) > 3][:2]
+            empresa_query = " ".join(empresa_words) if empresa_words else s["empresa"][:40]
+            # Dork específico: LinkedIn público con título Plant Manager/NPI/Gerente
+            query = f'site:linkedin.com/in ("Plant Manager" OR "NPI Manager" OR "Gerente de Lanzamiento" OR "Director de Operaciones") "{empresa_query}" OR "{ciudad}"'
+            results = await _apify_run_actor(
+                "apify~google-search-scraper",
+                {"queries": query, "maxPagesPerQuery": 1, "resultsPerPage": 10,
+                 "languageCode": "es", "countryCode": "mx", "saveHtml": False},
+                timeout_s=60,
             )
-            # Filtrar por nombre de empresa (Apollo no permite filtrar exacto)
-            empresa_lower = s["empresa"].lower()
-            empresa_words = [w for w in empresa_lower.split() if len(w) > 3][:2]
-            matched = [p for p in people if any(w in (p.get("organization", {}).get("name") or "").lower()
-                                                  for w in empresa_words)] or people[:por_empresa]
-            for p in matched[:por_empresa]:
-                org = p.get("organization", {}) or {}
-                out.append({
-                    "id": new_id(),
-                    "senal_id": s["id"],
-                    "empresa": org.get("name") or s["empresa"],
-                    "nombre_completo": f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
-                    "puesto": p.get("title", ""),
-                    "correo_directo": p.get("email") if p.get("email") else None,
-                    "telefono_movil": p.get("mobile_phone") if p.get("mobile_phone") else None,
-                    "linkedin_url": p.get("linkedin_url"),
-                    "nivel_precision": 90 if p.get("email") else 70,
-                    "fuente": "agente_2_apollo_search",
-                    "_apollo_id": p.get("id"),
-                    "estado_workflow": "pendiente",
-                    "fecha_deteccion": iso(now_utc()),
-                    "created_at": iso(now_utc()),
-                    "notas": f"Apollo.io search · org: {org.get('name','')} · industria: {org.get('industry','')}",
-                })
+            count = 0
+            for r in (results or []):
+                organic = r.get("organicResults", []) if isinstance(r, dict) else []
+                for item in organic:
+                    url_d = item.get("url", "")
+                    title = (item.get("title") or "").strip()
+                    desc = (item.get("description") or item.get("snippet") or "").strip()
+                    dom = urlparse(url_d).netloc.replace("www.", "").lower()
+                    if "linkedin.com" not in dom or "/in/" not in url_d:
+                        continue
+                    # Extraer nombre de title (típico: "John Doe - Plant Manager - ACME Inc")
+                    parts = title.split(" - ")
+                    nombre = parts[0].strip()
+                    puesto = parts[1].strip() if len(parts) > 1 else "Plant Manager"
+                    empresa_detected = parts[2].strip() if len(parts) > 2 else s["empresa"]
+                    if not nombre or len(nombre) < 4:
+                        continue
+                    # Email guesser usando patrón corporativo
+                    n_parts = nombre.lower().split()
+                    if len(n_parts) >= 2:
+                        email_local = f"{n_parts[0]}.{n_parts[-1]}"
+                    else:
+                        email_local = n_parts[0] if n_parts else "contacto"
+                    for a, b in [("á","a"),("é","e"),("í","i"),("ó","o"),("ú","u"),("ñ","n")]:
+                        email_local = email_local.replace(a, b)
+                    emp_slug = "".join([w[0].lower() for w in (empresa_detected or s["empresa"]).split()[:3] if w and w[0].isalpha()])
+                    email_guess = f"{email_local}@{emp_slug or 'empresa'}.com" if emp_slug else None
+                    out.append({
+                        "id": new_id(),
+                        "senal_id": s["id"],
+                        "empresa": empresa_detected or s["empresa"],
+                        "nombre_completo": nombre,
+                        "puesto": puesto,
+                        "correo_directo": email_guess,
+                        "telefono_movil": None,  # No conseguible vía SERP — necesita InMail/llamada
+                        "linkedin_url": url_d,
+                        "nivel_precision": 75,  # email es guess, requiere verificación Hunter
+                        "fuente": "agente_2_apify_linkedin_serp",
+                        "estado_workflow": "pendiente",
+                        "fecha_deteccion": iso(now_utc()),
+                        "created_at": iso(now_utc()),
+                        "notas": f"Apify SERP LinkedIn · Snippet: {desc[:100]}",
+                    })
+                    count += 1
+                    if count >= por_empresa:
+                        break
+                if count >= por_empresa:
+                    break
         if out:
-            logger.info(f"[AGENTE 2 LIVE] {len(out)} contactos reales vía Apollo")
+            logger.info(f"[AGENTE 2 LIVE] {len(out)} perfiles LinkedIn reales vía Apify SERP")
             return out
-        logger.warning("[AGENTE 2 LIVE] Apollo retornó vacío, usando demo")
+        logger.warning("[AGENTE 2 LIVE] Apify SERP retornó 0 perfiles LinkedIn, usando demo")
 
     # === MODO DEMO ===
     import random
@@ -4913,31 +4942,23 @@ async def _gf_agent3_datos_profundos(contactos: List[dict]) -> List[dict]:
     LIVE: Apollo.io people/match — gasta export credit y revela email/phone reales.
     DEMO: genera correos corporativos verosímiles + móviles aleatorios.
     """
-    # === MODO LIVE (Apollo enrichment) ===
-    if _osint_live_mode() and APOLLO_API_KEY:
+    # === MODO LIVE (sin Apollo — el contacto ya viene parcialmente enriquecido del Agente 2 LinkedIn)
+    # El móvil real requiere LinkedIn Sales Navigator/Apollo paid. Aquí completamos lo que se pueda
+    # con patrón corporativo + móvil placeholder para que workflow A (triangulación) pueda disparar.
+    if _osint_live_mode():
+        import random
         enriched = []
         for c in contactos:
-            # Si ya viene con datos del search, no gastamos otro credit
-            if c.get("correo_directo") and c.get("telefono_movil"):
-                enriched.append(c)
-                continue
-            partes = c["nombre_completo"].split(" ", 1)
-            first = partes[0] if partes else ""
-            last = partes[1] if len(partes) > 1 else ""
-            person = await _apollo_match_enrich(first, last, c.get("empresa"))
-            if person:
-                c["correo_directo"] = person.get("email") or c.get("correo_directo")
-                c["telefono_movil"] = person.get("mobile_phone") or person.get("phone") or c.get("telefono_movil")
-                c["nivel_precision"] = 95
-                c["notas"] = (c.get("notas") or "") + " | Apollo /people/match (verified)"
+            # Si Agente 2 ya trajo email, completamos solo móvil con placeholder claro
+            if c.get("correo_directo") and not c.get("telefono_movil"):
+                # Móvil placeholder claramente marcado para que Alberto sepa que debe pedirlo
+                c["telefono_movil"] = None  # explícitamente None — workflow A NO dispara sin tel real
+                c["notas"] = (c.get("notas") or "") + " | Móvil pendiente — pedir en primer email"
+                c["nivel_precision"] = 80
             enriched.append(c)
-        # Si ningún contacto se enriqueció, fallback a demo
-        if any((c.get("correo_directo") and c.get("telefono_movil")) for c in enriched):
-            logger.info(f"[AGENTE 3 LIVE] {sum(1 for c in enriched if c.get('correo_directo'))} contactos enriquecidos vía Apollo")
-            return enriched
-        logger.warning("[AGENTE 3 LIVE] Apollo enrichment vacío, fallback a demo")
+        return enriched
 
-    # === MODO DEMO (síntesis) ===
+    # === MODO DEMO (síntesis completa) ===
     import random
     enriched = []
     for c in contactos:
@@ -5909,6 +5930,409 @@ async def gf_listening_intents_update(iid: str, body: dict, user: dict = Depends
 async def gf_listening_foros(user: dict = Depends(require_greenfield)):
     items = await db.gf_forum_threads.find({}, {"_id": 0}).sort("detectado_at", -1).to_list(500)
     return items
+
+
+# ============================================================================
+# V5.2 · OPERACIÓN FRANCOTIRADOR DRO — Prescriptores técnicos
+# ----------------------------------------------------------------------------
+# Objetivo: extraer padrones de Directores Responsables de Obra (DRO) y
+# Corresponsables en Seguridad Estructural del Bajío para convertirlos en
+# prescriptores de canastillas pasajuntas. 2 agentes nuevos + pipeline propio.
+# ============================================================================
+
+DROStage = Literal[
+    "blanco_detectado",      # Datos extraídos y validados
+    "kit_cad_enviado",        # Abordaje inicial Alberto
+    "interaccion_tecnica",    # DRO respondió o descargó material
+    "prescriptor_activo",     # DRO especificó nuestras canastillas
+    "cierre_obra_ganada",     # Constructora compró por recomendación
+    "descartado",
+]
+
+DRO_STAGE_LABEL = {
+    "blanco_detectado": "Blanco Detectado",
+    "kit_cad_enviado": "Kit CAD Enviado",
+    "interaccion_tecnica": "Interacción Técnica",
+    "prescriptor_activo": "Prescriptor Activo",
+    "cierre_obra_ganada": "Cierre Obra Ganada",
+    "descartado": "Descartado",
+}
+
+DRO_STAGE_PROB = {
+    "blanco_detectado": 10, "kit_cad_enviado": 25, "interaccion_tecnica": 45,
+    "prescriptor_activo": 70, "cierre_obra_ganada": 100, "descartado": 0,
+}
+
+
+class PadronDROIn(BaseModel):
+    nombre: str
+    numero_registro: Optional[str] = None
+    especialidad: Optional[str] = None  # "Civil" | "Estructural" | "Arquitecto"
+    municipio: Optional[str] = None
+    estado_mx: str = "Querétaro"
+    telefono_movil: Optional[str] = None
+    telefono_oficina: Optional[str] = None
+    correo_electronico: Optional[str] = None
+    url_documento_fuente: Optional[str] = None
+    colegio_agremiado: Optional[str] = None
+    notas: Optional[str] = None
+
+
+class PadronDRO(PadronDROIn):
+    id: str
+    stage: DRO_STAGE = "blanco_detectado"  # type: ignore
+    probabilidad: int = 10
+    asignado_a: Optional[str] = None
+    asignado_nombre: Optional[str] = None
+    plantilla_mensaje: Optional[str] = None
+    fuente_agente: str
+    fecha_deteccion: str
+    historia: List[dict] = []
+    created_at: str
+    updated_at: str
+
+
+def _dro_generar_plantilla(dro: dict) -> str:
+    """Plantilla de mensaje pre-llenada para Alberto (1-clic WhatsApp/Email)."""
+    apellido = (dro.get("nombre", "").strip().split()[-1] if dro.get("nombre") else "Ingeniero")
+    municipio = dro.get("municipio") or dro.get("estado_mx") or "su zona"
+    return (
+        f"Ingeniero {apellido}, buen día. Mi nombre es Alberto. Lo contacto brevemente porque sé "
+        f"que usted firma y supervisa varios de los proyectos industriales pesados aquí en {municipio}. "
+        f"Actualmente tenemos la línea de producción local sacando 500 canastillas pasajuntas diarias "
+        f"para pisos industriales. Para facilitarle la integración en sus catálogos y planos estructurales, "
+        f"le preparé este enlace con nuestros Bloques CAD gratuitos y las fichas de especificación técnica "
+        f"de transferencia de carga. Si en sus próximas obras la constructora batalla con los tiempos de "
+        f"entrega, recuérdeles que estamos aquí mismo y resolvemos el mismo día. Quedo a sus órdenes."
+    )
+
+
+# ----------------------------------------------------------------------------
+# AGENTES DRO
+# ----------------------------------------------------------------------------
+async def _dro_agent1_gov(target_estados: List[str], limite: int = 8) -> List[dict]:
+    """AGENTE DRO-1: Infiltrado Gubernamental — padrones gov.mx municipales."""
+    if not (_osint_live_mode() and APIFY_TOKEN):
+        # Modo demo seedeado
+        import random
+        seed = [
+            {"nombre": "Ing. Roberto Martínez Vargas", "registro": "DRO-QRO-1245", "especialidad": "Civil",
+             "municipio": "El Marqués", "estado": "Querétaro",
+             "url": "https://www.elmarques.gob.mx/transparencia/padron-dro-2026.pdf"},
+            {"nombre": "Arq. María Fernanda Ruiz", "registro": "DRO-QRO-0891", "especialidad": "Estructural",
+             "municipio": "Corregidora", "estado": "Querétaro",
+             "url": "https://corregidora.gob.mx/obras/padron-peritos.pdf"},
+            {"nombre": "Ing. Juan Carlos Gómez", "registro": "DRO-GTO-0567", "especialidad": "Civil",
+             "municipio": "Silao", "estado": "Guanajuato",
+             "url": "https://silao.gob.mx/desarrollo-urbano/dro-2026.xls"},
+            {"nombre": "Ing. Patricia Hernández", "registro": "DRO-EDOMEX-2103", "especialidad": "Estructural",
+             "municipio": "Toluca", "estado": "Estado de México",
+             "url": "https://toluca.gob.mx/transparencia/padron-dro.pdf"},
+        ]
+        out = []
+        for d in seed[:limite]:
+            n_parts = d["nombre"].replace("Ing.", "").replace("Arq.", "").strip().lower().split()
+            email_local = f"{n_parts[0]}.{n_parts[-1]}" if len(n_parts) >= 2 else (n_parts[0] if n_parts else "contacto")
+            for a, b in [("á","a"),("é","e"),("í","i"),("ó","o"),("ú","u"),("ñ","n")]:
+                email_local = email_local.replace(a, b)
+            out.append({
+                "id": new_id(), "nombre": d["nombre"], "numero_registro": d["registro"],
+                "especialidad": d["especialidad"], "municipio": d["municipio"],
+                "estado_mx": d["estado"], "url_documento_fuente": d["url"],
+                "correo_electronico": f"{email_local}@constructora{random.randint(10,99)}.mx",
+                "telefono_movil": f"+52 {random.choice(['442','461','473','722'])}-{random.randint(100,999)}-{random.randint(1000,9999)}",
+                "telefono_oficina": None, "colegio_agremiado": None,
+                "notas": f"DEMO seed — dork: filetype:pdf 'Padrón DRO' '{d['municipio']}'",
+                "fuente_agente": "dro_agent1_gov", "fecha_deteccion": iso(now_utc()),
+            })
+        return out
+
+    # LIVE via Apify SERP
+    from urllib.parse import urlparse
+    out = []
+    municipios_estados = {
+        "Querétaro": ["El Marqués", "Colón", "Corregidora", "Querétaro"],
+        "Guanajuato": ["Silao", "Apaseo el Grande", "Celaya", "Irapuato"],
+        "Estado de México": ["Cuautitlán Izcalli", "Toluca", "Tepotzotlán"],
+    }
+    for estado in target_estados[:3]:
+        for muni in municipios_estados.get(estado, [])[:2]:
+            query = f'(filetype:pdf OR filetype:xls) ("Padrón de DRO" OR "Directores Responsables de Obra") "{muni}"'
+            results = await _apify_run_actor(
+                "apify~google-search-scraper",
+                {"queries": query, "maxPagesPerQuery": 1, "resultsPerPage": 5,
+                 "languageCode": "es", "countryCode": "mx", "saveHtml": False},
+                timeout_s=60,
+            )
+            for r in (results or []):
+                organic = r.get("organicResults", []) if isinstance(r, dict) else []
+                for item in organic[:3]:
+                    url_d = item.get("url", "")
+                    title = (item.get("title") or "").strip()
+                    desc = (item.get("description") or item.get("snippet") or "").strip()
+                    dom = urlparse(url_d).netloc.lower()
+                    if not ("gob.mx" in dom or "edu.mx" in dom):
+                        continue
+                    # Crear entrada placeholder con doc fuente — el parseo del PDF queda manual
+                    out.append({
+                        "id": new_id(),
+                        "nombre": f"DRO en padrón — {title[:60]}",
+                        "numero_registro": None, "especialidad": None,
+                        "municipio": muni, "estado_mx": estado,
+                        "url_documento_fuente": url_d,
+                        "correo_electronico": None, "telefono_movil": None,
+                        "telefono_oficina": None, "colegio_agremiado": None,
+                        "notas": f"Apify SERP gov.mx · {desc[:120]}. ⚠️ Padrón pendiente de procesamiento manual o LLM PDF parser.",
+                        "fuente_agente": "dro_agent1_gov_apify",
+                        "fecha_deteccion": iso(now_utc()),
+                    })
+                    if len(out) >= limite:
+                        break
+                if len(out) >= limite:
+                    break
+            if len(out) >= limite:
+                break
+        if len(out) >= limite:
+            break
+    if out:
+        logger.info(f"[DRO-1 LIVE] {len(out)} padrones reales detectados vía Apify SERP")
+    return out
+
+
+async def _dro_agent2_colegiado(limite: int = 6) -> List[dict]:
+    """AGENTE DRO-2: Rastreador Colegiado — colegios edu.mx / org.mx."""
+    if not (_osint_live_mode() and APIFY_TOKEN):
+        import random
+        seed = [
+            {"nombre": "Ing. Eduardo Salazar", "colegio": "Colegio de Ingenieros Civiles de Querétaro",
+             "especialidad": "Civil", "municipio": "Querétaro", "estado": "Querétaro",
+             "url": "https://www.cicquro.org.mx/agremiados"},
+            {"nombre": "Arq. Lucía Domínguez", "colegio": "Colegio de Arquitectos de Guanajuato",
+             "especialidad": "Estructural", "municipio": "Celaya", "estado": "Guanajuato",
+             "url": "https://colegioarquitectosgto.org.mx/directorio"},
+        ]
+        out = []
+        for d in seed[:limite]:
+            out.append({
+                "id": new_id(), "nombre": d["nombre"], "especialidad": d["especialidad"],
+                "municipio": d["municipio"], "estado_mx": d["estado"],
+                "colegio_agremiado": d["colegio"], "url_documento_fuente": d["url"],
+                "telefono_oficina": f"+52 {random.choice(['442','461'])}-{random.randint(200,800)}-{random.randint(1000,9999)}",
+                "correo_electronico": None, "telefono_movil": None,
+                "numero_registro": None,
+                "notas": f"DEMO seed — Colegio: {d['colegio']}",
+                "fuente_agente": "dro_agent2_colegiado",
+                "fecha_deteccion": iso(now_utc()),
+            })
+        return out
+
+    from urllib.parse import urlparse
+    out = []
+    queries = [
+        'site:edu.mx OR site:org.mx "Directorio de Agremiados" OR "Colegio de Ingenieros Civiles" "Querétaro" OR "Celaya" OR "Silao"',
+        'site:org.mx "Colegio de Arquitectos" OR "Peritos" "Bajío" OR "Querétaro" OR "Guanajuato"',
+    ]
+    for q in queries:
+        results = await _apify_run_actor(
+            "apify~google-search-scraper",
+            {"queries": q, "maxPagesPerQuery": 1, "resultsPerPage": 5,
+             "languageCode": "es", "countryCode": "mx", "saveHtml": False},
+            timeout_s=60,
+        )
+        for r in (results or []):
+            organic = r.get("organicResults", []) if isinstance(r, dict) else []
+            for item in organic[:3]:
+                url_d = item.get("url", "")
+                title = (item.get("title") or "").strip()
+                desc = (item.get("description") or item.get("snippet") or "").strip()
+                dom = urlparse(url_d).netloc.lower()
+                if not ("edu.mx" in dom or "org.mx" in dom):
+                    continue
+                out.append({
+                    "id": new_id(),
+                    "nombre": f"Colegio agremiado — {title[:60]}",
+                    "colegio_agremiado": dom,
+                    "url_documento_fuente": url_d,
+                    "especialidad": None, "municipio": None,
+                    "estado_mx": "Querétaro",  # default Bajío
+                    "correo_electronico": None, "telefono_movil": None,
+                    "telefono_oficina": None, "numero_registro": None,
+                    "notas": f"Apify SERP colegio · {desc[:120]}",
+                    "fuente_agente": "dro_agent2_colegiado_apify",
+                    "fecha_deteccion": iso(now_utc()),
+                })
+                if len(out) >= limite:
+                    break
+            if len(out) >= limite:
+                break
+        if len(out) >= limite:
+            break
+    if out:
+        logger.info(f"[DRO-2 LIVE] {len(out)} colegios detectados vía Apify SERP")
+    return out
+
+
+async def _dro_run_pipeline(target_estados: List[str] = None, limite: int = 8,
+                             manual_user: Optional[dict] = None) -> dict:
+    """Orquesta DRO-1 + DRO-2 + dedupe + workflow Alberto."""
+    target_estados = target_estados or ["Querétaro", "Guanajuato", "Estado de México"]
+    run_id = new_id()
+    started = iso(now_utc())
+    logger.info(f"[DRO][RUN {run_id}] Inicio Operación Francotirador")
+    try:
+        gov = await _dro_agent1_gov(target_estados, limite=limite)
+        col = await _dro_agent2_colegiado(limite=max(2, limite // 2))
+        # Cross-reference + dedupe por nombre normalizado
+        seen_names = set()
+        unicos = []
+        for d in gov + col:
+            key = d["nombre"].lower().strip()
+            if key in seen_names:
+                continue
+            exists = await db.padron_dro.find_one({"nombre": d["nombre"]}, {"_id": 1})
+            if exists:
+                continue
+            seen_names.add(key)
+            unicos.append(d)
+        # Alberto auto-assignment + plantilla + auto-task si tiene contacto
+        alberto = await _gf_user_alberto()
+        inserted = 0
+        tareas_creadas = 0
+        for d in unicos:
+            d["stage"] = "blanco_detectado"
+            d["probabilidad"] = 10
+            d["asignado_a"] = alberto.get("id")
+            d["asignado_nombre"] = alberto.get("name")
+            d["plantilla_mensaje"] = _dro_generar_plantilla(d)
+            d["historia"] = []
+            d["created_at"] = iso(now_utc())
+            d["updated_at"] = iso(now_utc())
+            await db.padron_dro.insert_one(d)
+            inserted += 1
+            # REGLA 1: si tiene email O teléfono → tarea automática
+            if d.get("correo_electronico") or d.get("telefono_movil") or d.get("telefono_oficina"):
+                await db.gf_tareas.insert_one({
+                    "id": new_id(),
+                    "tipo": "francotirador_dro",
+                    "prioridad": "alta",
+                    "titulo": f"Ejecutar abordaje de Francotirador — {d['nombre']}",
+                    "descripcion": (
+                        f"DRO detectado: {d['nombre']} ({d.get('especialidad') or 'Civil'}) en "
+                        f"{d.get('municipio') or d.get('estado_mx')}.\n"
+                        f"Email: {d.get('correo_electronico') or 'no disponible'} · "
+                        f"Tel: {d.get('telefono_movil') or d.get('telefono_oficina') or 'no disponible'}.\n"
+                        f"Doc fuente: {d.get('url_documento_fuente') or '—'}\n\n"
+                        f"PLANTILLA WhatsApp/Email lista en el perfil del DRO."
+                    ),
+                    "empresa": f"DRO {d.get('municipio') or d.get('estado_mx')}",
+                    "asignado_a": alberto.get("id"),
+                    "asignado_nombre": alberto.get("name"),
+                    "estado": "abierta",
+                    "creado_por_sistema": True,
+                    "created_at": iso(now_utc()),
+                })
+                tareas_creadas += 1
+        result = {
+            "run_id": run_id, "iniciada": started, "finalizada": iso(now_utc()),
+            "ejecutada_por": (manual_user or {}).get("id", "scheduler"),
+            "target_estados": target_estados,
+            "gov_detectados": len(gov), "colegios_detectados": len(col),
+            "unicos_insertados": inserted,
+            "tareas_creadas_alberto": tareas_creadas,
+            "modo": "live" if _osint_live_mode() else "demo",
+            "ok": True,
+        }
+        await db.dro_runs.insert_one(result)
+        logger.info(f"[DRO][RUN {run_id}] ✅ {inserted} DROs + {tareas_creadas} tareas Alberto")
+        return {k: v for k, v in result.items() if k != "_id"}
+    except Exception as e:
+        logger.exception(f"[DRO][RUN {run_id}] Error: {e}")
+        return {"run_id": run_id, "ok": False, "error": str(e)}
+
+
+# ----------------------------------------------------------------------------
+# Endpoints Francotirador DRO
+# ----------------------------------------------------------------------------
+@api.post("/francotirador/run")
+async def dro_run(body: Optional[dict] = None, user: dict = Depends(require_roles("director", "socio", "comercial"))):
+    body = body or {}
+    return await _dro_run_pipeline(
+        target_estados=body.get("estados") or ["Querétaro", "Guanajuato", "Estado de México"],
+        limite=int(body.get("limite", 8)),
+        manual_user=user,
+    )
+
+
+@api.get("/francotirador/padron")
+async def dro_list(estado_mx: Optional[str] = None, stage: Optional[str] = None,
+                    municipio: Optional[str] = None, user: dict = Depends(require_greenfield)):
+    q = {}
+    if estado_mx:
+        q["estado_mx"] = estado_mx
+    if stage:
+        q["stage"] = stage
+    if municipio:
+        q["municipio"] = municipio
+    items = await db.padron_dro.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return items
+
+
+@api.get("/francotirador/embudo")
+async def dro_embudo(user: dict = Depends(require_greenfield)):
+    items = await db.padron_dro.find({}, {"_id": 0}).sort("updated_at", -1).to_list(500)
+    by_stage = {s: [] for s in DRO_STAGE_LABEL.keys()}
+    for it in items:
+        by_stage.setdefault(it.get("stage", "blanco_detectado"), []).append(it)
+    return {
+        "stages": [
+            {"key": k, "label": v, "items": by_stage[k]}
+            for k, v in DRO_STAGE_LABEL.items()
+        ],
+        "total": len(items),
+    }
+
+
+@api.post("/francotirador/{did}/move")
+async def dro_move(did: str, body: dict, user: dict = Depends(require_greenfield)):
+    stage = body.get("stage")
+    if stage not in DRO_STAGE_LABEL:
+        raise HTTPException(status_code=400, detail="stage inválido")
+    dro = await db.padron_dro.find_one({"id": did}, {"_id": 0})
+    if not dro:
+        raise HTTPException(status_code=404, detail="DRO no encontrado")
+    hist = {
+        "ts": iso(now_utc()), "user_id": user.get("id"), "user_name": user.get("name"),
+        "accion": "move_stage",
+        "detalle": f"{DRO_STAGE_LABEL.get(dro.get('stage'), '')} → {DRO_STAGE_LABEL[stage]}",
+    }
+    await db.padron_dro.update_one(
+        {"id": did},
+        {"$set": {"stage": stage, "probabilidad": DRO_STAGE_PROB[stage], "updated_at": iso(now_utc())},
+         "$push": {"historia": hist}},
+    )
+    return await db.padron_dro.find_one({"id": did}, {"_id": 0})
+
+
+@api.patch("/francotirador/{did}")
+async def dro_update(did: str, body: dict, user: dict = Depends(require_greenfield)):
+    allowed = {"nombre", "numero_registro", "especialidad", "municipio", "estado_mx",
+               "telefono_movil", "telefono_oficina", "correo_electronico", "notas", "colegio_agremiado"}
+    upd = {k: v for k, v in body.items() if k in allowed}
+    if not upd:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+    upd["updated_at"] = iso(now_utc())
+    r = await db.padron_dro.update_one({"id": did}, {"$set": upd})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="DRO no encontrado")
+    return await db.padron_dro.find_one({"id": did}, {"_id": 0})
+
+
+@api.delete("/francotirador/{did}")
+async def dro_delete(did: str, user: dict = Depends(require_roles("director", "socio"))):
+    r = await db.padron_dro.delete_one({"id": did})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="DRO no encontrado")
+    return {"ok": True}
 
 
 # ============================================================================
