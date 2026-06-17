@@ -5145,7 +5145,7 @@ async def _gf_run_pipeline(target_estados: List[str] = None, limite_senales: int
             "contactos_detectados": len(contactos_raw),
             "contactos_validados": len(sintesis["contactos_validos"]),
             "contactos_descartados": sintesis["contactos_sin_via_descartados"],
-            "modo": "demo_seeded",  # cambia a "brave_api" o "apollo" cuando se enchufen
+            "modo": "live" if _osint_live_mode() else "demo_seeded",  # cambia automáticamente con OSINT_MODE
             "ok": True,
         }
         await db.gf_runs.insert_one(result)
@@ -5376,9 +5376,10 @@ async def _gf_agent5_infiltrado_chats(limite: int = 6) -> List[dict]:
     """
     if _osint_live_mode() and APIFY_TOKEN:
         out = []
+        # Dorks específicos: grupos donde hablan de canastillas/pasajuntas/construcción
         dorks = [
-            'site:chat.whatsapp.com ("constructores" OR "ingenieros civiles" OR "concreteras") ("Querétaro" OR "Monterrey" OR "Toluca" OR "Silao")',
-            'site:t.me/joinchat ("construcción" OR "pisos industriales" OR "proveedores obra")',
+            'site:chat.whatsapp.com ("constructores" OR "concreteras" OR "pisos industriales" OR "obra industrial") ("Querétaro" OR "Monterrey" OR "Bajío" OR "México")',
+            'site:t.me/joinchat ("pisos industriales" OR "construcción industrial" OR "concreto hidráulico" OR "proveedores obra")',
         ]
         for query in dorks:
             results = await _apify_run_actor(
@@ -5392,15 +5393,28 @@ async def _gf_agent5_infiltrado_chats(limite: int = 6) -> List[dict]:
                 for item in organic:
                     url = item.get("url", "")
                     title = item.get("title", "") or "Grupo detectado"
+                    desc = item.get("description") or item.get("snippet") or ""
                     if "chat.whatsapp.com" not in url and "t.me/" not in url:
                         continue
+                    # Filtro positivo: title o desc debe mencionar construcción
+                    full_text = (title + " " + desc).lower()
+                    construccion_kw = ["construct", "constructor", "concreto", "obra", "ingeniero civil",
+                                        "piso industrial", "concreter", "ingenieros", "ingeniería civil",
+                                        "obra industrial", "constructive", "edificación", "infraestructura"]
+                    if not any(kw in full_text for kw in construccion_kw):
+                        continue
+                    # Filtro negativo
+                    ruido_kw = ["educateca", "biblioteca", "libros", "café", "anime", "manga",
+                                 "música", "religión", "deport", "fútbol", "baby"]
+                    if any(kw in full_text for kw in ruido_kw):
+                        continue
                     plat = "whatsapp" if "chat.whatsapp.com" in url else "telegram"
-                    # Extraer ciudad del título si aparece
-                    ciudad = next((c for c in GF_LISTEN_CIUDADES if c.lower() in title.lower()), "México")
+                    ciudad = next((c for c in GF_LISTEN_CIUDADES if c.lower() in (title + desc).lower()), "México")
                     out.append({
                         "id": new_id(), "plataforma": plat, "nombre_grupo": title[:80],
                         "url_invitacion": url, "ciudad": ciudad,
-                        "audiencia_estimada": "—", "notas": f"Apify SERP dork: {query[:60]}",
+                        "audiencia_estimada": "—",
+                        "notas": f"Apify SERP · filtro construcción validado",
                         "activo": True, "detectado_at": iso(now_utc()), "asignado_a": None,
                     })
                     if len(out) >= limite:
@@ -5410,9 +5424,10 @@ async def _gf_agent5_infiltrado_chats(limite: int = 6) -> List[dict]:
             if len(out) >= limite:
                 break
         if out:
-            logger.info(f"[AGENTE 5 LIVE] {len(out)} grupos reales vía Apify SERP")
+            logger.info(f"[AGENTE 5 LIVE] {len(out)} grupos reales validados (Apify SERP + filtros)")
             return out
-        logger.warning("[AGENTE 5 LIVE] Apify retornó vacío, usando demo")
+        logger.info("[AGENTE 5 LIVE] Apify no encontró grupos de construcción hoy (normal)")
+        return []  # No fallback — preferimos 0 leads reales que falsos
 
     # === MODO DEMO ===
     import random
@@ -5438,18 +5453,106 @@ async def _gf_agent5_infiltrado_chats(limite: int = 6) -> List[dict]:
 
 async def _gf_agent6_intent_interceptor(limite: int = 8) -> List[dict]:
     """AGENTE 6: Interceptor de Intención — Twitter/X, Reddit, FB grupos.
-    Producción: Twitter API v2 search + Reddit API + Brave Search dorks.
-    Demo: genera mensajes realistas con timestamps variados (algunos <24h = alerta_roja).
+    LIVE: Apify Triple-Actor (Twitter + Reddit + Facebook scrapers).
+    DEMO: genera mensajes realistas con timestamps variados.
     """
+    if _osint_live_mode() and APIFY_TOKEN:
+        out = []
+        # Dorks QUIRÚRGICOS: frases exactas + términos de construcción + exclusiones
+        # Evita: ecobici, café, repostería, baby shower, etc.
+        dorks_intent = [
+            ('twitter',  '(site:twitter.com OR site:x.com) ("canastillas pasajuntas" OR "pasajuntas" OR ("canastillas" "pisos industriales") OR ("canastillas" "concreto hidráulico")) -bicicleta -café -baby -repostería'),
+            ('reddit',   'site:reddit.com ("canastillas pasajuntas" OR "pasajuntas" OR "dowel baskets") (construcción OR cotizar OR proveedor OR "piso industrial") -café -ecobici'),
+            ('facebook', 'site:facebook.com/groups ("canastillas pasajuntas" OR "pasajuntas pisos" OR "juntas constructivas" OR "acero pisos industriales") mexico'),
+        ]
+        from urllib.parse import urlparse
+        for plat, query in dorks_intent:
+            results = await _apify_run_actor(
+                "apify~google-search-scraper",
+                {"queries": query, "maxPagesPerQuery": 1, "resultsPerPage": 10,
+                 "languageCode": "es", "countryCode": "mx", "saveHtml": False},
+                timeout_s=90,
+            )
+            for r in (results or []):
+                organic = r.get("organicResults", []) if isinstance(r, dict) else []
+                for item in organic:
+                    url_d = item.get("url", "")
+                    title = (item.get("title") or "").strip()
+                    desc = (item.get("description") or item.get("snippet") or "").strip()
+                    if not url_d or not (title or desc):
+                        continue
+                    full_text = (title + " " + desc).lower()
+                    # FILTRO POSITIVO: debe contener al menos una palabra de construcción
+                    construccion_kw = ["pasajunta", "junta constructiva", "piso industrial",
+                                        "concreto hidráulic", "concreto industrial", "dowel basket",
+                                        "acero piso", "pavimento", "mr-45", "mr-50", "junta de colado",
+                                        "junta de contracción", "obra civil", "construcción industrial"]
+                    if not any(kw in full_text for kw in construccion_kw):
+                        # Si solo dice "canastillas" sin contexto industrial, descartar
+                        continue
+                    # FILTRO NEGATIVO: ruido conocido
+                    ruido_kw = ["ecobici", "bicicleta", "café", "cafetera", "aeropress", "breville",
+                                "baby shower", "repostería", "supermercado", "cesta", "moisés",
+                                "carrito de bebé", "carrito de super", "carriola"]
+                    if any(kw in full_text for kw in ruido_kw):
+                        continue
+                    # Plataforma
+                    dom = urlparse(url_d).netloc.replace("www.", "").lower()
+                    if plat == "twitter" and not ("twitter.com" in dom or "x.com" in dom):
+                        continue
+                    if plat == "reddit" and "reddit.com" not in dom:
+                        continue
+                    if plat == "facebook" and "facebook.com" not in dom:
+                        continue
+                    # Usuario
+                    if plat == "twitter":
+                        try:
+                            user = f"@{url_d.split('/')[3]}"
+                        except Exception:
+                            user = "@desconocido"
+                    elif plat == "reddit":
+                        try:
+                            parts = url_d.split("/")
+                            user = f"r/{parts[parts.index('r')+1]}"
+                        except Exception:
+                            user = "r/mexico"
+                    else:
+                        user = "FB Group"
+                    mensaje = (title + " — " + desc) if desc and desc not in title else (title or desc)
+                    mensaje = mensaje[:300]
+                    ciudad = next((c for c in GF_LISTEN_CIUDADES if c.lower() in mensaje.lower()), "México")
+                    kw = next((k for k in ["pasajuntas", "canastillas", "acero", "concreto", "juntas"] if k in mensaje.lower()), "pisos")
+                    out.append({
+                        "id": new_id(), "plataforma": plat, "usuario": user,
+                        "mensaje": mensaje, "url_directa": url_d, "ciudad": ciudad,
+                        "palabra_clave": kw, "timestamp_origen": iso(now_utc()),
+                        "urgencia": "alta", "es_inminente": False,
+                        "detectado_at": iso(now_utc()), "procesada": False,
+                        "convertida_a_radar": None,
+                        "notas": f"Apify SERP · plat: {plat} · keyword construcción validada",
+                    })
+                    if len(out) >= limite:
+                        break
+                if len(out) >= limite:
+                    break
+            if len(out) >= limite:
+                break
+
+        if out:
+            logger.info(f"[AGENTE 6 LIVE] {len(out)} intents reales validados (Apify SERP + filtros construcción)")
+            return out[:limite]
+        logger.info("[AGENTE 6 LIVE] Apify SERP no encontró intents válidos hoy (normal — el nicho es muy específico)")
+        return []  # No hacemos fallback a demo en LIVE — preferimos 0 leads reales que 8 falsos
+
+    # === MODO DEMO ===
     import random
     out = []
     for _ in range(limite):
-        ciudad = random.choice(GF_LISTEN_CIUDADES[:7])  # prioriza polos principales
+        ciudad = random.choice(GF_LISTEN_CIUDADES[:7])
         plataforma = random.choices(["twitter", "reddit", "facebook"], weights=[5, 3, 2])[0]
         usuario = random.choice(_GF_LISTEN_USUARIOS)
         tpl = random.choice(_GF_LISTEN_INTENT_TEMPLATES)
         mensaje = tpl.format(ciudad=ciudad)
-        # Timestamp variable: 60% últimas 24h (alerta roja), 30% últimos 3d, 10% más viejo
         edad_h = random.choices(
             [random.randint(1, 23), random.randint(24, 72), random.randint(72, 168)],
             weights=[6, 3, 1],
@@ -5457,9 +5560,7 @@ async def _gf_agent6_intent_interceptor(limite: int = 8) -> List[dict]:
         ts_origen = datetime.now(timezone.utc) - timedelta(hours=edad_h)
         es_inminente = edad_h < 24
         urgencia = "alerta_roja" if es_inminente else ("alta" if edad_h < 72 else "media")
-        # Palabra clave detectada
         keyword = next((kw for kw in ["canastillas", "pasajuntas", "acero", "concreto", "juntas"] if kw in mensaje.lower()), "pisos")
-        # URL directa al comentario
         slug = "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=10))
         if plataforma == "twitter":
             url = f"https://twitter.com/{usuario.replace('@','')}/status/{random.randint(10**18, 10**19)}"
@@ -5469,17 +5570,11 @@ async def _gf_agent6_intent_interceptor(limite: int = 8) -> List[dict]:
             url = f"https://facebook.com/groups/constructoresmx/posts/{random.randint(10**14, 10**15)}"
         out.append({
             "id": new_id(),
-            "plataforma": plataforma,
-            "usuario": usuario,
-            "mensaje": mensaje,
-            "url_directa": url,
-            "ciudad": ciudad,
-            "palabra_clave": keyword,
+            "plataforma": plataforma, "usuario": usuario, "mensaje": mensaje,
+            "url_directa": url, "ciudad": ciudad, "palabra_clave": keyword,
             "timestamp_origen": iso(ts_origen),
-            "urgencia": urgencia,
-            "es_inminente": es_inminente,
-            "detectado_at": iso(now_utc()),
-            "procesada": False,
+            "urgencia": urgencia, "es_inminente": es_inminente,
+            "detectado_at": iso(now_utc()), "procesada": False,
             "convertida_a_radar": None,
             "notas": f"Dork: \"{tpl.split('{')[0].strip()}\" + \"{keyword}\" + \"{ciudad}\"",
         })
@@ -5714,7 +5809,7 @@ async def _gf_run_listening_pipeline(limite_intents: int = 8, limite_chats: int 
             "promovidos_radar": promovidos_radar,
             "foros_nuevos": len(sintesis["foros_nuevos"]),
             "ruido_descartado": sintesis["ruido_descartado"],
-            "modo": "demo_seeded",
+            "modo": "live" if _osint_live_mode() else "demo_seeded",
             "ok": True,
         }
         await db.gf_runs_listening.insert_one(result)
