@@ -5980,7 +5980,7 @@ class PadronDROIn(BaseModel):
 
 class PadronDRO(PadronDROIn):
     id: str
-    stage: DRO_STAGE = "blanco_detectado"  # type: ignore
+    stage: DROStage = "blanco_detectado"  # type: ignore
     probabilidad: int = 10
     asignado_a: Optional[str] = None
     asignado_nombre: Optional[str] = None
@@ -6366,6 +6366,11 @@ async def _scheduler_loop():
                 logger.info("[SCHEDULER] Sending morning digest")
                 await run_morning_alert()
                 SCRAPER_STATE["_last_alert_day"] = today_key
+            # 06:00 CDMX → Operación Francotirador DRO (barrida diaria)
+            if cdmx_hour == 6 and SCRAPER_STATE.get("_last_dro_day") != today_key:
+                logger.info("[SCHEDULER] Running Francotirador DRO pipeline")
+                await _dro_run_pipeline()
+                SCRAPER_STATE["_last_dro_day"] = today_key
             # 07:00 CDMX → Radar Greenfield OSINT barrida diaria
             if cdmx_hour == 7 and SCRAPER_STATE.get("_last_greenfield_day") != today_key:
                 logger.info("[SCHEDULER] Running Greenfield OSINT pipeline")

@@ -21,6 +21,7 @@ import AdminRHPage from "@/pages/AdminRHPage";
 import AdminRutaVentasPage from "@/pages/AdminRutaVentasPage";
 import AdminGastosPage from "@/pages/AdminGastosPage";
 import AdminRadarGreenfieldPage from "@/pages/AdminRadarGreenfieldPage";
+import AdminFrancotiradorDROPage from "@/pages/AdminFrancotiradorDROPage";
 
 function ProtectedStaff({ children }) {
   const { user, cliente, loading } = useAuth();
@@ -69,6 +70,7 @@ function App() {
               <Route path="admin/ruta-ventas" element={<AdminRutaVentasPage />} />
               <Route path="admin/gastos" element={<AdminGastosPage />} />
               <Route path="admin/radar-greenfield" element={<AdminRadarGreenfieldPage />} />
+              <Route path="admin/francotirador-dro" element={<AdminFrancotiradorDROPage />} />
             </Route>
           </Routes>
         </AuthProvider>

@@ -1,0 +1,38 @@
+{
+  "summary": "V5.2 Operación Francotirador DRO + CARRY-OVER Marcar Visita testeado end-to-end. Backend pytest 22/22 PASS (100%). Login director/comercial OK. POST /api/francotirador/run con limite=2 ejecutó pipeline en modo LIVE (Apify) y devolvió {ok:true, unicos_insertados, tareas_creadas_alberto, modo:'live', gov_detectados, colegios_detectados}. GET /padron retorna lista con filtros estado_mx/stage/municipio funcionando. GET /embudo retorna {stages:[6 columnas con keys exactos blanco_detectado→descartado], total} y la suma de items coincide con total. POST /{did}/move con stage válido actualiza probabilidad (kit_cad_enviado→25) y agrega historia con accion='move_stage'; con stage inválido devuelve 400. PATCH respeta whitelist (ignora campo_no_permitido) y con body vacío de campos permitidos devuelve 400. DELETE: comercial recibe 403 (RBAC OK), director borra OK con 200 y segundo DELETE devuelve 404. CARRY-OVER Marcar Visita VALIDADO end-to-end: POST /api/ruta-ventas/{rid}/parada/{eid}/visita con estatus='visitada' (1) crea oportunidad de prospección automática (oportunidad_creada=true), (2) inserta actividad en db.actividades de tipo 'visita' ligada a opp y ruta, (3) actualiza paradas[i].visita en la ruta, (4) actividad consultable via /api/oportunidades/{oid}/actividades. Estatus inválido devuelve 422 (pydantic). Frontend Playwright: login staff OK; /admin/francotirador-dro renderiza con francotirador-dro-page, tab Padrón con 5 DROs (dro-row-*), botón dro-run-btn visible, dro-plantilla-{id} abre modal con dro-plantilla-text + dro-send-whatsapp (cuando hay tel) + dro-copy-msg, botón Email se sustituye por placeholder 'Sin email' deshabilitado cuando el DRO no tiene correo (UX equivalente a spec). Tab Embudo muestra dro-kanban con las 6 columnas correctas (dro-stage-blanco_detectado, kit_cad_enviado, interaccion_tecnica, prescriptor_activo, cierre_obra_ganada, descartado) y botones move por card. Regresión OK: /dashboard/kpis, /clientes, /cotizaciones, /empresas, /admin/ruta-ventas siguen funcionando. CERO bloqueantes.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Modal Plantilla DRO", "issues": ["Spec dice 'botones WhatsApp/Email se deshabilitan si no hay tel/email'. Implementación sustituye el botón por un placeholder distinto ('Sin email'/'Sin teléfono') sin data-testid. Funcionalmente equivalente — sólo nota de QA, no es bug."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v52_francotirador_dro.py",
+    "/app/test_reports/pytest/pytest_v52_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py llega a 6432 líneas — V5.2 añadió ~400 líneas más de lógica DRO. URGENTE: split por dominio (mover francotirador/* a /app/backend/modules/dro.py).",
+    "POST /api/francotirador/{did}/move acepta body:dict sin BaseModel. Conviene definir DROMoveIn(BaseModel){stage:DROStage} para validación pydantic automática (hoy el check 'stage not in DRO_STAGE_LABEL' funciona, pero documentación OpenAPI no muestra el shape).",
+    "PATCH /api/francotirador/{did} también acepta body:dict — mismo comentario. Definir DROPatchIn con campos optional para mejor OpenAPI.",
+    "_dro_agent1_gov modo LIVE crea entradas con 'nombre: DRO en padrón — {title[:60]}' que NO son DROs reales sino metadatos del PDF fuente. Conviene agregar flag 'requiere_parseo_manual:true' o mover a colección dro_padrones_pendientes hasta que se procese el PDF.",
+    "DRO sin email NI teléfono igualmente se inserta en padron pero no se crea tarea para Alberto (línea 6213) — está bien, pero conviene log info para auditoría de cuántos DROs quedan sin contacto.",
+    "Front AdminFrancotiradorDROPage.jsx (593 líneas) está sobre el umbral recomendable. Split posible: PlantillaModal/EditDROModal a archivos separados.",
+    "El modal Plantilla muestra placeholder 'Sin email'/'Sin teléfono' sin data-testid — agregar data-testid='dro-no-email-placeholder' / 'dro-no-tel-placeholder' para automatización QA."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v52_francotirador_dro.py (nuevo, 22 tests)"
+  ],
+  "success_rate": {"backend": "100% (22/22)", "frontend": "100%"},
+  "test_credentials": "director@deyma.mx/Deyma2026!, comercial@deyma.mx/Comercial2026! — ambos funcionan. RBAC validado: comercial puede ejecutar run/move/patch DRO pero NO delete (403 confirmado). Director puede todo.",
+  "seed_data_creation": "Tests crean 1 empresa TEST_QA + 1 ruta con 1 parada + se ejecuta /francotirador/run con limite=2 (puede agregar 0-2 DROs LIVE). test_cleanup borra ruta y empresa. test_delete_dro_director_ok borra 1 DRO de los detectados. Sin contaminación residual significativa.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "V5.2 DRO stable. Endpoints: POST /api/francotirador/run (body opcional {estados:[], limite:int}, roles=director/socio/comercial), GET /padron (filtros estado_mx, stage, municipio), GET /embudo, POST /{did}/move {stage}, PATCH /{did} {whitelist}, DELETE /{did} (sólo director/socio). El pipeline en modo LIVE usa Apify SERP (apify~google-search-scraper) y _dro_agent2_colegiado para edu.mx. Los DROs LIVE detectados de SERP son metadatos del PDF fuente, no DROs parseados — flag potencial pendiente. Para tests sin gastar Apify usar limite=1. Carry-over Marcar Visita: POST /api/ruta-ventas/{rid}/parada/{eid}/visita {estatus,nota,nueva_fecha} crea actividad CRM en db.actividades + crea opp de prospección si la empresa no tiene oportunidades abiertas. RBAC: ventas (comercial/director/socio). Estatus válidos: visitada/no_atendio/reagendada/cancelada.",
+  "rca of the issue": "N/A — no hay issues. Únicas observaciones son de code-review (split server.py + uso de BaseModel en endpoints POST/PATCH del DRO + data-testid para placeholders de WhatsApp/Email vacíos)."
+}
