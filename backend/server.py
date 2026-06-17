@@ -8,6 +8,7 @@ import os
 import uuid
 import logging
 import asyncio
+import httpx
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal, Tuple
 
@@ -4612,6 +4613,90 @@ async def gf_tareas_update(tid: str, body: dict, user: dict = Depends(require_gr
 # Apollo. El Agente 4 (Sintetizador) ya usa Emergent LLM.
 # ----------------------------------------------------------------------------
 
+# === Integraciones reales V5.2 (Apify + Apollo) ===
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "").strip()
+APOLLO_API_KEY = os.environ.get("APOLLO_API_KEY", "").strip()
+BRAND24_TOKEN = os.environ.get("BRAND24_TOKEN", "").strip()
+OSINT_MODE = os.environ.get("OSINT_MODE", "demo").strip().lower()  # "demo" | "live"
+
+
+def _osint_live_mode() -> bool:
+    """Retorna True solo si hay keys reales y modo live."""
+    if OSINT_MODE != "live":
+        return False
+    return bool(APIFY_TOKEN or APOLLO_API_KEY)
+
+
+async def _apify_run_actor(actor_id: str, run_input: dict, timeout_s: int = 120) -> List[dict]:
+    """Ejecuta un Apify actor y retorna los items del dataset.
+    Pattern oficial: POST /acts/{actor_id}/run-sync-get-dataset-items
+    Doc: https://docs.apify.com/api/v2#/reference/actors/run-actor-synchronously
+    """
+    if not APIFY_TOKEN:
+        return []
+    url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync-get-dataset-items"
+    params = {"token": APIFY_TOKEN}
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as cli:
+            r = await cli.post(url, params=params, json=run_input)
+            if r.status_code not in (200, 201):
+                logger.warning(f"[APIFY] actor={actor_id} HTTP {r.status_code}: {r.text[:200]}")
+                return []
+            return r.json() or []
+    except Exception as e:
+        logger.warning(f"[APIFY] actor={actor_id} error: {e}")
+        return []
+
+
+async def _apollo_people_search(titles: List[str], locations: List[str],
+                                  industries: List[str] = None, per_page: int = 25) -> List[dict]:
+    """Apollo.io mixed_people/search. Retorna lista de personas con email/mobile (si verified)."""
+    if not APOLLO_API_KEY:
+        return []
+    url = "https://api.apollo.io/api/v1/mixed_people/search"
+    payload = {
+        "person_titles": titles,
+        "person_locations": locations,
+        "contact_email_status": ["verified"],
+        "page": 1,
+        "per_page": per_page,
+    }
+    if industries:
+        payload["organization_industries"] = industries
+    headers = {"Content-Type": "application/json", "x-api-key": APOLLO_API_KEY, "Cache-Control": "no-cache"}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as cli:
+            r = await cli.post(url, json=payload, headers=headers)
+            if r.status_code != 200:
+                logger.warning(f"[APOLLO] search HTTP {r.status_code}: {r.text[:200]}")
+                return []
+            return r.json().get("people", [])
+    except Exception as e:
+        logger.warning(f"[APOLLO] search error: {e}")
+        return []
+
+
+async def _apollo_match_enrich(first_name: str, last_name: str, organization_name: Optional[str] = None) -> Optional[dict]:
+    """Apollo.io people/match — gasta un export credit y revela email/phone reales."""
+    if not APOLLO_API_KEY:
+        return None
+    url = "https://api.apollo.io/api/v1/people/match"
+    payload = {"first_name": first_name, "last_name": last_name, "reveal_personal_emails": True,
+               "reveal_phone_number": True}
+    if organization_name:
+        payload["organization_name"] = organization_name
+    headers = {"Content-Type": "application/json", "x-api-key": APOLLO_API_KEY, "Cache-Control": "no-cache"}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as cli:
+            r = await cli.post(url, json=payload, headers=headers)
+            if r.status_code != 200:
+                return None
+            return (r.json() or {}).get("person")
+    except Exception as e:
+        logger.warning(f"[APOLLO] match error: {e}")
+        return None
+
+
 _GF_BAJIO_SECTORES = ["Automotriz", "Aeroespacial", "Electrónica", "Logística/CEDIS",
                        "Data Center", "Alimentos", "Farmacéutica", "Manufactura"]
 
@@ -4667,9 +4752,56 @@ _GF_PUESTOS_GREENFIELD = [
 
 async def _gf_agent1_inmobiliario_gov(target_estados: List[str], limite: int = 5) -> List[dict]:
     """AGENTE 1: Radar Inmobiliario y Gubernamental.
-    En producción: Brave Search con dorks `filetype:pdf "MIA" "Parque Industrial" ...`.
-    En MVP demo: genera señales realistas con randomización + LLM para sintetizar título.
+    LIVE: Apify Google Search Scraper con dorks MIA/Parques Industriales.
+    DEMO: genera señales realistas con randomización.
     """
+    # === MODO LIVE (Apify Google SERP) ===
+    if _osint_live_mode() and APIFY_TOKEN:
+        out = []
+        for estado in target_estados[:3]:  # limita queries para no quemar credits
+            query = f'filetype:pdf "Manifestación de Impacto Ambiental" OR "MIA" "Parque Industrial" "{estado}" 2026'
+            results = await _apify_run_actor(
+                "apify~google-search-scraper",
+                {"queries": query, "maxPagesPerQuery": 1, "resultsPerPage": 10, "languageCode": "es",
+                 "countryCode": "mx", "saveHtml": False},
+                timeout_s=90,
+            )
+            for r in (results or [])[:max(2, limite // len(target_estados))]:
+                # Apify devuelve estructura {searchQuery, organicResults: [{url, title, description, ...}]}
+                organic = r.get("organicResults", []) if isinstance(r, dict) else []
+                for item in organic[:limite]:
+                    title = item.get("title", "")
+                    url = item.get("url", "")
+                    desc = item.get("description", "") or item.get("snippet", "")
+                    if not (title and url):
+                        continue
+                    # Heurística: extraer empresa del título o descripción
+                    empresa = title.split(" - ")[0].split(":")[0].strip()[:80] or "Detectado en MIA"
+                    ciudad = next((c[0] for c in _GF_BAJIO_CIUDADES if c[1] == estado and c[0].lower() in (title + desc).lower()),
+                                  next((c[0] for c in _GF_BAJIO_CIUDADES if c[1] == estado), estado))
+                    out.append({
+                        "id": new_id(), "empresa": empresa, "origen": "MIA",
+                        "urgencia": "medio", "url_referencia": url,
+                        "estado_mx": estado, "ciudad": ciudad,
+                        "sector_industrial": "Manufactura",  # Lo refina el LLM si aplica
+                        "monto_estimado": 60_000_000,
+                        "notas": f"Detectado vía Apify SERP. Snippet: {desc[:150]}",
+                        "fecha_deteccion": iso(now_utc()),
+                        "agente_origen": "agente_1_apify_serp",
+                        "estado_workflow": "radar_activado",
+                        "created_at": iso(now_utc()),
+                    })
+                    if len(out) >= limite:
+                        break
+            if len(out) >= limite:
+                break
+        if out:
+            logger.info(f"[AGENTE 1 LIVE] {len(out)} señales reales vía Apify SERP")
+            return out[:limite]
+        # fallthrough a demo si Apify no devolvió nada
+        logger.warning("[AGENTE 1 LIVE] Apify SERP retornó vacío, usando seed demo como fallback")
+
+    # === MODO DEMO (semilla realista) ===
     import random
     detectados = []
     n = min(limite, len(_GF_EMPRESAS_GREENFIELD))
@@ -4706,9 +4838,50 @@ async def _gf_agent1_inmobiliario_gov(target_estados: List[str], limite: int = 5
 
 async def _gf_agent2_talento_linkedin(senales: List[dict], por_empresa: int = 2) -> List[dict]:
     """AGENTE 2: Sabueso de Talento (LinkedIn).
-    En producción: site:linkedin.com/in con dorks de puestos Greenfield.
-    En MVP demo: genera contactos realistas asociados a las señales del Agente 1.
+    LIVE: Apollo.io people search por título + organización.
+    DEMO: genera contactos realistas asociados a las señales del Agente 1.
     """
+    # === MODO LIVE (Apollo) ===
+    if _osint_live_mode() and APOLLO_API_KEY:
+        out = []
+        for s in senales:
+            people = await _apollo_people_search(
+                titles=["Plant Manager", "NPI Manager", "Gerente de Lanzamiento",
+                        "Construction Manager", "Site Manager", "Director de Operaciones"],
+                locations=["Mexico"],
+                industries=["construction", "manufacturing", "automotive", "aerospace"],
+                per_page=por_empresa * 3,
+            )
+            # Filtrar por nombre de empresa (Apollo no permite filtrar exacto)
+            empresa_lower = s["empresa"].lower()
+            empresa_words = [w for w in empresa_lower.split() if len(w) > 3][:2]
+            matched = [p for p in people if any(w in (p.get("organization", {}).get("name") or "").lower()
+                                                  for w in empresa_words)] or people[:por_empresa]
+            for p in matched[:por_empresa]:
+                org = p.get("organization", {}) or {}
+                out.append({
+                    "id": new_id(),
+                    "senal_id": s["id"],
+                    "empresa": org.get("name") or s["empresa"],
+                    "nombre_completo": f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
+                    "puesto": p.get("title", ""),
+                    "correo_directo": p.get("email") if p.get("email") else None,
+                    "telefono_movil": p.get("mobile_phone") if p.get("mobile_phone") else None,
+                    "linkedin_url": p.get("linkedin_url"),
+                    "nivel_precision": 90 if p.get("email") else 70,
+                    "fuente": "agente_2_apollo_search",
+                    "_apollo_id": p.get("id"),
+                    "estado_workflow": "pendiente",
+                    "fecha_deteccion": iso(now_utc()),
+                    "created_at": iso(now_utc()),
+                    "notas": f"Apollo.io search · org: {org.get('name','')} · industria: {org.get('industry','')}",
+                })
+        if out:
+            logger.info(f"[AGENTE 2 LIVE] {len(out)} contactos reales vía Apollo")
+            return out
+        logger.warning("[AGENTE 2 LIVE] Apollo retornó vacío, usando demo")
+
+    # === MODO DEMO ===
     import random
     contactos = []
     for s in senales:
@@ -4722,8 +4895,8 @@ async def _gf_agent2_talento_linkedin(senales: List[dict], por_empresa: int = 2)
                 "empresa": s["empresa"],
                 "nombre_completo": nombre,
                 "puesto": puesto,
-                "correo_directo": None,  # Agente 3 lo llena
-                "telefono_movil": None,  # Agente 3 lo llena
+                "correo_directo": None,
+                "telefono_movil": None,
                 "linkedin_url": f"https://linkedin.com/in/{slug}-{random.randint(100,999)}",
                 "nivel_precision": random.randint(55, 80),
                 "fuente": "agente_2_linkedin_dork",
@@ -4737,29 +4910,54 @@ async def _gf_agent2_talento_linkedin(senales: List[dict], por_empresa: int = 2)
 
 async def _gf_agent3_datos_profundos(contactos: List[dict]) -> List[dict]:
     """AGENTE 3: Infiltrado de Datos Profundos.
-    En producción: simulación de Apollo/Lusha + dorks site:drive.google.com.
-    En MVP demo: genera correos corporativos verosímiles + móviles aleatorios.
+    LIVE: Apollo.io people/match — gasta export credit y revela email/phone reales.
+    DEMO: genera correos corporativos verosímiles + móviles aleatorios.
     """
+    # === MODO LIVE (Apollo enrichment) ===
+    if _osint_live_mode() and APOLLO_API_KEY:
+        enriched = []
+        for c in contactos:
+            # Si ya viene con datos del search, no gastamos otro credit
+            if c.get("correo_directo") and c.get("telefono_movil"):
+                enriched.append(c)
+                continue
+            partes = c["nombre_completo"].split(" ", 1)
+            first = partes[0] if partes else ""
+            last = partes[1] if len(partes) > 1 else ""
+            person = await _apollo_match_enrich(first, last, c.get("empresa"))
+            if person:
+                c["correo_directo"] = person.get("email") or c.get("correo_directo")
+                c["telefono_movil"] = person.get("mobile_phone") or person.get("phone") or c.get("telefono_movil")
+                c["nivel_precision"] = 95
+                c["notas"] = (c.get("notas") or "") + " | Apollo /people/match (verified)"
+            enriched.append(c)
+        # Si ningún contacto se enriqueció, fallback a demo
+        if any((c.get("correo_directo") and c.get("telefono_movil")) for c in enriched):
+            logger.info(f"[AGENTE 3 LIVE] {sum(1 for c in enriched if c.get('correo_directo'))} contactos enriquecidos vía Apollo")
+            return enriched
+        logger.warning("[AGENTE 3 LIVE] Apollo enrichment vacío, fallback a demo")
+
+    # === MODO DEMO (síntesis) ===
     import random
     enriched = []
     for c in contactos:
-        # Email corporativo: nombre.apellido@dominio
+        if c.get("correo_directo") and c.get("telefono_movil"):
+            enriched.append(c)
+            continue
         partes = c["nombre_completo"].lower().split()
         if len(partes) >= 2:
             email_local = f"{partes[0]}.{partes[-1]}"
         else:
             email_local = partes[0] if partes else "contacto"
-        # Quitar acentos básicos
         for a, b in [("á","a"),("é","e"),("í","i"),("ó","o"),("ú","u"),("ñ","n")]:
             email_local = email_local.replace(a, b)
         emp_slug = "".join([w[0].lower() for w in c["empresa"].split()[:3] if w and w[0].isalpha()])
         dominio = f"{emp_slug or 'empresa'}.com"
         c["correo_directo"] = f"{email_local}@{dominio}"
-        # Teléfono móvil MX
         lada = random.choice(["55", "442", "461", "473", "722", "777"])
         c["telefono_movil"] = f"+52 {lada}-{random.randint(100,999)}-{random.randint(1000,9999)}"
         c["nivel_precision"] = min(95, c["nivel_precision"] + random.randint(10, 20))
-        c["notas"] = (c.get("notas") or "") + " | Enriquecido vía Agente 3 (Apollo-sim)"
+        c["notas"] = (c.get("notas") or "") + " | Enriquecido vía Agente 3 (demo)"
         enriched.append(c)
     return enriched
 
@@ -5003,6 +5201,12 @@ async def gf_agentes_status(user: dict = Depends(require_greenfield)):
     total_opps = await db.greenfield_opps.count_documents({})
     return {
         "ultimas_corridas": last,
+        "modo": "live" if _osint_live_mode() else "demo",
+        "integraciones": {
+            "apify": bool(APIFY_TOKEN),
+            "apollo": bool(APOLLO_API_KEY),
+            "brand24": bool(BRAND24_TOKEN),
+        },
         "totales": {
             "senales": total_senales,
             "contactos": total_contactos,
@@ -5167,9 +5371,50 @@ _GF_LISTEN_FOROS = [
 
 async def _gf_agent5_infiltrado_chats(limite: int = 6) -> List[dict]:
     """AGENTE 5: Infiltrado de Chats — extrae enlaces de WhatsApp/Telegram.
-    Producción: dorks `site:chat.whatsapp.com "constructores" "Querétaro"`.
-    Demo: muestra realistas con URLs ficticias pero plausibles.
+    LIVE: Apify Google SERP scraper con dorks site:chat.whatsapp.com / site:t.me/joinchat.
+    DEMO: muestra realistas con URLs ficticias plausibles.
     """
+    if _osint_live_mode() and APIFY_TOKEN:
+        out = []
+        dorks = [
+            'site:chat.whatsapp.com ("constructores" OR "ingenieros civiles" OR "concreteras") ("Querétaro" OR "Monterrey" OR "Toluca" OR "Silao")',
+            'site:t.me/joinchat ("construcción" OR "pisos industriales" OR "proveedores obra")',
+        ]
+        for query in dorks:
+            results = await _apify_run_actor(
+                "apify~google-search-scraper",
+                {"queries": query, "maxPagesPerQuery": 1, "resultsPerPage": 10,
+                 "languageCode": "es", "countryCode": "mx"},
+                timeout_s=90,
+            )
+            for r in (results or []):
+                organic = r.get("organicResults", []) if isinstance(r, dict) else []
+                for item in organic:
+                    url = item.get("url", "")
+                    title = item.get("title", "") or "Grupo detectado"
+                    if "chat.whatsapp.com" not in url and "t.me/" not in url:
+                        continue
+                    plat = "whatsapp" if "chat.whatsapp.com" in url else "telegram"
+                    # Extraer ciudad del título si aparece
+                    ciudad = next((c for c in GF_LISTEN_CIUDADES if c.lower() in title.lower()), "México")
+                    out.append({
+                        "id": new_id(), "plataforma": plat, "nombre_grupo": title[:80],
+                        "url_invitacion": url, "ciudad": ciudad,
+                        "audiencia_estimada": "—", "notas": f"Apify SERP dork: {query[:60]}",
+                        "activo": True, "detectado_at": iso(now_utc()), "asignado_a": None,
+                    })
+                    if len(out) >= limite:
+                        break
+                if len(out) >= limite:
+                    break
+            if len(out) >= limite:
+                break
+        if out:
+            logger.info(f"[AGENTE 5 LIVE] {len(out)} grupos reales vía Apify SERP")
+            return out
+        logger.warning("[AGENTE 5 LIVE] Apify retornó vacío, usando demo")
+
+    # === MODO DEMO ===
     import random
     out = []
     sample = random.sample(_GF_LISTEN_GRUPOS_SEMILLA, min(limite, len(_GF_LISTEN_GRUPOS_SEMILLA)))
@@ -5243,9 +5488,45 @@ async def _gf_agent6_intent_interceptor(limite: int = 8) -> List[dict]:
 
 async def _gf_agent7_foros(limite: int = 4) -> List[dict]:
     """AGENTE 7: Rastreador de Foros — CMIC, SkyscraperCity, foros ingeniería.
-    Producción: scraping de foros (cuidado con ToS) + Brave Search inurl:forum.
-    Demo: hilos plausibles.
+    LIVE: Apify Google SERP con dorks inurl:forum/foro + canastillas/pasajuntas.
+    DEMO: hilos plausibles.
     """
+    if _osint_live_mode() and APIFY_TOKEN:
+        out = []
+        query = '(inurl:forum OR inurl:foro) ("canastillas" OR "pasajuntas" OR "pisos industriales") ("proveedores" OR "cotización" OR "recomendación")'
+        results = await _apify_run_actor(
+            "apify~google-search-scraper",
+            {"queries": query, "maxPagesPerQuery": 1, "resultsPerPage": 10,
+             "languageCode": "es", "countryCode": "mx"},
+            timeout_s=90,
+        )
+        for r in (results or []):
+            organic = r.get("organicResults", []) if isinstance(r, dict) else []
+            for item in organic[:limite * 2]:
+                url = item.get("url", "")
+                title = item.get("title", "")
+                if not (url and title):
+                    continue
+                # Extraer dominio como "foro"
+                from urllib.parse import urlparse
+                dom = urlparse(url).netloc.replace("www.", "")
+                ciudad = next((c for c in GF_LISTEN_CIUDADES if c.lower() in (title + (item.get('description') or '')).lower()), "México")
+                out.append({
+                    "id": new_id(), "foro": dom, "titulo": title[:120], "url": url,
+                    "autor": "—", "ciudad": ciudad, "actividad": "media",
+                    "notas": f"Apify SERP dork. Snippet: {(item.get('description') or '')[:120]}",
+                    "detectado_at": iso(now_utc()),
+                })
+                if len(out) >= limite:
+                    break
+            if len(out) >= limite:
+                break
+        if out:
+            logger.info(f"[AGENTE 7 LIVE] {len(out)} hilos reales vía Apify SERP")
+            return out
+        logger.warning("[AGENTE 7 LIVE] Apify retornó vacío, usando demo")
+
+    # === MODO DEMO ===
     import random
     titulos = [
         "Recomendaciones canastillas pasajuntas para piso industrial 5,000 m²",

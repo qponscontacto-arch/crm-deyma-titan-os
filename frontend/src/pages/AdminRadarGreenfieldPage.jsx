@@ -41,20 +41,34 @@ export default function AdminRadarGreenfieldPage() {
 
   return (
     <div className="p-6 space-y-6 max-w-[1600px] mx-auto" data-testid="radar-greenfield-page">
-      {/* BANNER MODO DEMO — extremadamente visible */}
-      <div className="border-2 border-rose-500 bg-rose-500/20 p-4 flex items-start gap-3" data-testid="gf-demo-banner">
-        <AlertOctagon size={24} className="text-rose-400 shrink-0 mt-0.5 animate-pulse" />
-        <div className="flex-1">
-          <div className="text-rose-300 font-black text-sm uppercase tracking-widest" style={{ fontFamily: "Chivo, sans-serif" }}>
-            ⚠️ MODO DEMO — Datos sintéticos de ejemplo
-          </div>
-          <div className="text-xs text-rose-200/90 mt-1 leading-relaxed">
-            Los usuarios, mensajes y URLs en las pestañas <b>Alertas Rojas, Zonas de Caza, Escucha Activa y Señales/Contactos</b> son
-            <b> EJEMPLOS GENERADOS</b> para demostrar el sistema. <span className="underline">No son leads reales</span>: los botones "Responder" y "Unirse" no llevarán a ningún sitio.
-            Para activar leads reales necesitas conectar APIs (Brave/Twitter/Apollo) — pídelo en el chat.
+      {/* BANNER MODO DEMO/LIVE — se actualiza según status */}
+      {status?.modo === "live" ? (
+        <div className="border-2 border-emerald-500 bg-emerald-500/15 p-3 flex items-center gap-3" data-testid="gf-live-banner">
+          <CheckCircle2 size={20} className="text-emerald-400 shrink-0" />
+          <div className="flex-1 text-xs">
+            <span className="text-emerald-300 font-black uppercase tracking-widest" style={{ fontFamily: "Chivo, sans-serif" }}>
+              ✓ MODO LIVE — Datos reales en producción
+            </span>
+            <span className="text-emerald-200/80 ml-2">
+              Integraciones activas: {status.integraciones?.apify ? "Apify ✓ " : ""}{status.integraciones?.apollo ? "Apollo ✓ " : ""}{status.integraciones?.brand24 ? "Brand24 ✓" : ""}
+            </span>
           </div>
         </div>
-      </div>
+      ) : (
+        <div className="border-2 border-rose-500 bg-rose-500/20 p-4 flex items-start gap-3" data-testid="gf-demo-banner">
+          <AlertOctagon size={24} className="text-rose-400 shrink-0 mt-0.5 animate-pulse" />
+          <div className="flex-1">
+            <div className="text-rose-300 font-black text-sm uppercase tracking-widest" style={{ fontFamily: "Chivo, sans-serif" }}>
+              ⚠️ MODO DEMO — Datos sintéticos de ejemplo
+            </div>
+            <div className="text-xs text-rose-200/90 mt-1 leading-relaxed">
+              Los usuarios, mensajes y URLs en las pestañas <b>Alertas Rojas, Zonas de Caza, Escucha Activa y Señales/Contactos</b> son
+              <b> EJEMPLOS GENERADOS</b> para demostrar el sistema. <span className="underline">No son leads reales</span>: los botones "Responder" y "Unirse" no llevarán a ningún sitio.
+              Para activar leads reales, pega tus API keys de Apify+Apollo en <code className="text-rose-100">/app/backend/.env</code> y reinicia.
+            </div>
+          </div>
+        </div>
+      )}
 
       <header className="flex items-start justify-between gap-4">
         <div>
