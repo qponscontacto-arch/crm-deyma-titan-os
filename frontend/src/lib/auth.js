@@ -1,7 +1,17 @@
 import axios from "axios";
 import React, { createContext, useContext, useEffect, useState } from "react";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+// Resolver BACKEND_URL con fallback defensivo:
+// 1) Si la env var apunta a un dominio claramente roto (legado o inválido), ignorarla.
+// 2) Si no está definida o está rota, usar el mismo dominio del navegador
+//    (en Emergent, el ingress redirige /api → backend automáticamente).
+// 3) Solo usar la env var si parece válida.
+const _envUrl = process.env.REACT_APP_BACKEND_URL;
+const _KNOWN_BAD_HOSTS = ["deyma.tech"]; // dominios legados que rompen producción
+const _isBroken = _envUrl && _KNOWN_BAD_HOSTS.some((h) => _envUrl.includes(h));
+const BACKEND_URL = (_envUrl && !_isBroken)
+  ? _envUrl
+  : (typeof window !== "undefined" ? window.location.origin : "");
 export const API = `${BACKEND_URL}/api`;
 
 const TOKEN_KEY = "deyma_token";
