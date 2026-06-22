@@ -6730,10 +6730,76 @@ async def _notif_get_config() -> dict:
             "whatsapp_to": DEYMA_ALERT_PHONE or "",
             "email_to": [SENDGRID_FROM_EMAIL] if SENDGRID_FROM_EMAIL else [],
             "min_batch_size": 1,  # avisa siempre, incluso 1 contacto
+            "extra_recipients": [],  # [{name, whatsapp, email, intro_message}]
             "updated_at": iso(now_utc()),
         }
         await db.system_config.insert_one({**cfg})
+    cfg.setdefault("extra_recipients", [])
     return cfg
+
+
+def _build_message_wa(new_contacts: List[dict], src_label: str, intro: str = "") -> str:
+    """Construye el cuerpo WhatsApp para un destinatario, con saludo opcional."""
+    lines = []
+    if intro:
+        lines.extend([intro.strip(), ""])
+    lines.extend([
+        f"🆕 DEYMA RADAR · {len(new_contacts)} contacto{'s' if len(new_contacts) != 1 else ''} nuevo{'s' if len(new_contacts) != 1 else ''}",
+        f"Fuente: {src_label}",
+        "",
+    ])
+    top = new_contacts[:5]
+    for i, c in enumerate(top, 1):
+        who = c.get("nombre")
+        extra = []
+        if c.get("empresa"):
+            extra.append(c["empresa"])
+        if c.get("ciudad"):
+            extra.append(c["ciudad"])
+        ext = f" · {' · '.join(extra)}" if extra else ""
+        ch = c.get("email") or c.get("telefono") or "—"
+        lines.append(f"{i}. {who}{ext} → {ch}")
+    if len(new_contacts) > 5:
+        lines.append(f"… y {len(new_contacts) - 5} más en el CRM.")
+    lines.append("\nAbre el CRM → Contactos para dar seguimiento.")
+    return "\n".join(lines)
+
+
+def _build_message_html(new_contacts: List[dict], src_label: str, intro: str = "") -> str:
+    rows_html = []
+    for c in new_contacts[:50]:
+        rows_html.append(
+            f"<tr>"
+            f"<td style='padding:6px;border-bottom:1px solid #eee'><b>{c.get('nombre','')}</b><br/>"
+            f"<span style='color:#666;font-size:11px'>{c.get('puesto','') or '—'}</span></td>"
+            f"<td style='padding:6px;border-bottom:1px solid #eee;font-size:12px'>{c.get('empresa','') or '—'}<br/>"
+            f"<span style='color:#666;font-size:11px'>{c.get('ciudad','') or ''}</span></td>"
+            f"<td style='padding:6px;border-bottom:1px solid #eee;font-size:12px'>{c.get('email','') or '—'}</td>"
+            f"<td style='padding:6px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px'>{c.get('telefono','') or '—'}</td>"
+            f"</tr>"
+        )
+    intro_html = (
+        f"<div style='background:#fef3c7;border-left:4px solid #f59e0b;padding:12px;margin-bottom:14px;font-size:14px;color:#78350f'>"
+        f"{intro}</div>"
+    ) if intro else ""
+    return (
+        f"<div style='font-family:sans-serif;max-width:760px'>"
+        f"<div style='color:#f59e0b;font-size:11px;letter-spacing:2px;text-transform:uppercase'>DEYMA · RADAR</div>"
+        f"<h2 style='margin:6px 0'>🆕 {len(new_contacts)} contacto{'s' if len(new_contacts) != 1 else ''} nuevo{'s' if len(new_contacts) != 1 else ''}</h2>"
+        f"<div style='color:#666;font-size:12px;margin-bottom:14px'>Fuente: <b>{src_label}</b> · "
+        f"{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}</div>"
+        f"{intro_html}"
+        f"<table style='width:100%;border-collapse:collapse;font-size:13px'>"
+        f"<thead><tr style='background:#0a0a0a;color:#fff'>"
+        f"<th style='padding:8px;text-align:left'>Nombre / Puesto</th>"
+        f"<th style='padding:8px;text-align:left'>Empresa / Ciudad</th>"
+        f"<th style='padding:8px;text-align:left'>Email</th>"
+        f"<th style='padding:8px;text-align:left'>Teléfono</th>"
+        f"</tr></thead><tbody>{''.join(rows_html)}</tbody></table>"
+        f"<div style='margin-top:18px;color:#666;font-size:11px;border-top:1px solid #eee;padding-top:10px'>"
+        f"DEYMA RADAR · Sistema de notificación automática</div>"
+        f"</div>"
+    )
 
 
 async def _sync_contacts_to_crm(contacts_raw: List[dict], source: str) -> List[dict]:
@@ -6783,11 +6849,12 @@ async def _sync_contacts_to_crm(contacts_raw: List[dict], source: str) -> List[d
 
 
 async def _notify_new_contacts_batch(new_contacts: List[dict], source: str) -> dict:
-    """Envía WhatsApp + Email resumiendo lote de contactos nuevos.
-    No envía nada si la lista está vacía o si el canal está desactivado.
+    """Envía WhatsApp + Email resumiendo lote de contactos nuevos a TODOS los destinatarios
+    configurados (director principal + extra_recipients con mensaje personalizado opcional).
     """
     result = {"ok": True, "count": len(new_contacts), "source": source,
-              "wa_sent": False, "email_sent": False, "errors": []}
+              "wa_sent": False, "email_sent": False, "errors": [],
+              "destinatarios": []}
     if not new_contacts:
         return result
     cfg = await _notif_get_config()
@@ -6802,74 +6869,66 @@ async def _notify_new_contacts_batch(new_contacts: List[dict], source: str) -> d
         "cliente_aprobado": "Cliente aprobado",
     }.get(source, source)
 
-    # --- WhatsApp ---
-    if cfg.get("whatsapp_enabled") and cfg.get("whatsapp_to"):
-        top = new_contacts[:5]
-        lines = [f"🆕 DEYMA RADAR · {len(new_contacts)} contacto{'s' if len(new_contacts) != 1 else ''} nuevo{'s' if len(new_contacts) != 1 else ''}",
-                 f"Fuente: {src_label}", ""]
-        for i, c in enumerate(top, 1):
-            who = c.get("nombre")
-            extra = []
-            if c.get("empresa"):
-                extra.append(c["empresa"])
-            if c.get("ciudad"):
-                extra.append(c["ciudad"])
-            ext = f" · {' · '.join(extra)}" if extra else ""
-            ch = c.get("email") or c.get("telefono") or "—"
-            lines.append(f"{i}. {who}{ext} → {ch}")
-        if len(new_contacts) > 5:
-            lines.append(f"… y {len(new_contacts) - 5} más en el CRM.")
-        lines.append("\nAbre el CRM → Contactos para dar seguimiento.")
-        body = "\n".join(lines)
-        wa_res = await send_whatsapp(cfg["whatsapp_to"], body)
-        result["wa_sent"] = bool(wa_res.get("sid") and not wa_res.get("mock"))
-        result["wa_status"] = wa_res.get("status") or wa_res.get("mock")
-        if wa_res.get("error"):
-            result["errors"].append(f"wa: {wa_res['error']}")
+    subject_base = f"🆕 {len(new_contacts)} contacto{'s' if len(new_contacts) != 1 else ''} nuevo{'s' if len(new_contacts) != 1 else ''} · {src_label}"
 
-    # --- Email ---
-    if cfg.get("email_enabled") and cfg.get("email_to"):
-        # tabla HTML
-        rows_html = []
-        for c in new_contacts[:50]:
-            rows_html.append(
-                f"<tr>"
-                f"<td style='padding:6px;border-bottom:1px solid #eee'><b>{c.get('nombre','')}</b><br/>"
-                f"<span style='color:#666;font-size:11px'>{c.get('puesto','') or '—'}</span></td>"
-                f"<td style='padding:6px;border-bottom:1px solid #eee;font-size:12px'>{c.get('empresa','') or '—'}<br/>"
-                f"<span style='color:#666;font-size:11px'>{c.get('ciudad','') or ''}</span></td>"
-                f"<td style='padding:6px;border-bottom:1px solid #eee;font-size:12px'>{c.get('email','') or '—'}</td>"
-                f"<td style='padding:6px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px'>{c.get('telefono','') or '—'}</td>"
-                f"</tr>"
-            )
-        html = (
-            f"<div style='font-family:sans-serif;max-width:760px'>"
-            f"<div style='color:#f59e0b;font-size:11px;letter-spacing:2px;text-transform:uppercase'>DEYMA · RADAR</div>"
-            f"<h2 style='margin:6px 0'>🆕 {len(new_contacts)} contacto{'s' if len(new_contacts) != 1 else ''} nuevo{'s' if len(new_contacts) != 1 else ''}</h2>"
-            f"<div style='color:#666;font-size:12px;margin-bottom:14px'>Fuente: <b>{src_label}</b> · "
-            f"{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}</div>"
-            f"<table style='width:100%;border-collapse:collapse;font-size:13px'>"
-            f"<thead><tr style='background:#0a0a0a;color:#fff'>"
-            f"<th style='padding:8px;text-align:left'>Nombre / Puesto</th>"
-            f"<th style='padding:8px;text-align:left'>Empresa / Ciudad</th>"
-            f"<th style='padding:8px;text-align:left'>Email</th>"
-            f"<th style='padding:8px;text-align:left'>Teléfono</th>"
-            f"</tr></thead><tbody>{''.join(rows_html)}</tbody></table>"
-            f"<div style='margin-top:18px;color:#666;font-size:11px;border-top:1px solid #eee;padding-top:10px'>"
-            f"DEYMA RADAR · Sistema de notificación automática · "
-            f"Configura tus preferencias en /admin/notificaciones</div>"
-            f"</div>"
-        )
-        subject = f"🆕 {len(new_contacts)} contacto{'s' if len(new_contacts) != 1 else ''} nuevo{'s' if len(new_contacts) != 1 else ''} · {src_label}"
-        recipients = cfg["email_to"] if isinstance(cfg["email_to"], list) else [cfg["email_to"]]
-        any_ok = False
-        for to in recipients:
-            sg_res = await send_email_sendgrid(to, subject, html, plain=None)
-            if sg_res.get("status") == "sent" or sg_res.get("status_code") in (200, 201, 202):
-                any_ok = True
-            elif sg_res.get("error"):
-                result["errors"].append(f"email[{to}]: {sg_res['error']}")
-        result["email_sent"] = any_ok
+    # Construir lista total de destinatarios:
+    # [{name, whatsapp, email, intro_message}]
+    destinatarios = []
+    # Principal (director)
+    primary_emails = cfg.get("email_to") if isinstance(cfg.get("email_to"), list) else (
+        [cfg["email_to"]] if cfg.get("email_to") else []
+    )
+    if cfg.get("whatsapp_to") or primary_emails:
+        destinatarios.append({
+            "name": "Director",
+            "whatsapp": cfg.get("whatsapp_to") or "",
+            "emails": primary_emails,
+            "intro_message": "",
+        })
+    # Extras
+    for r in (cfg.get("extra_recipients") or []):
+        if not r.get("whatsapp") and not r.get("email"):
+            continue
+        destinatarios.append({
+            "name": r.get("name") or "Destinatario",
+            "whatsapp": r.get("whatsapp") or "",
+            "emails": [r["email"]] if r.get("email") else [],
+            "intro_message": r.get("intro_message") or "",
+        })
+
+    # Enviar a cada destinatario
+    for dest in destinatarios:
+        d_result = {"name": dest["name"], "wa": None, "emails": []}
+
+        # WhatsApp
+        if cfg.get("whatsapp_enabled") and dest["whatsapp"]:
+            wa_body = _build_message_wa(new_contacts, src_label, dest.get("intro_message", ""))
+            wa_res = await send_whatsapp(dest["whatsapp"], wa_body)
+            wa_ok = bool(wa_res.get("sid") and not wa_res.get("mock"))
+            d_result["wa"] = {
+                "to": dest["whatsapp"],
+                "ok": wa_ok,
+                "status": wa_res.get("status") or wa_res.get("mock"),
+                "error": wa_res.get("error"),
+            }
+            if wa_ok:
+                result["wa_sent"] = True
+            elif wa_res.get("error"):
+                result["errors"].append(f"WA[{dest['name']}]: {wa_res['error']}")
+
+        # Email(s)
+        if cfg.get("email_enabled") and dest["emails"]:
+            html = _build_message_html(new_contacts, src_label, dest.get("intro_message", ""))
+            for em in dest["emails"]:
+                sg_res = await send_email_sendgrid(em, subject_base, html, plain=None)
+                ok = sg_res.get("status") == "sent" or sg_res.get("status_code") in (200, 201, 202)
+                d_result["emails"].append({"to": em, "ok": ok, "error": sg_res.get("error")})
+                if ok:
+                    result["email_sent"] = True
+                elif sg_res.get("error"):
+                    result["errors"].append(f"Email[{dest['name']}/{em}]: {sg_res['error']}")
+
+        result["destinatarios"].append(d_result)
 
     # Historial
     await db.contact_notifications.insert_one({
@@ -6880,6 +6939,7 @@ async def _notify_new_contacts_batch(new_contacts: List[dict], source: str) -> d
         "wa_sent": result["wa_sent"],
         "email_sent": result["email_sent"],
         "sample_names": [c.get("nombre") for c in new_contacts[:5]],
+        "destinatarios": result["destinatarios"],
         "created_at": iso(now_utc()),
         "errors": result["errors"],
     })
@@ -6897,7 +6957,8 @@ async def notif_get_cfg(user: dict = Depends(require_roles("director", "socio"))
 
 @api.patch("/notif-contactos/config")
 async def notif_patch_cfg(body: dict, user: dict = Depends(require_roles("director", "socio"))):
-    ALLOWED = {"whatsapp_enabled", "email_enabled", "whatsapp_to", "email_to", "min_batch_size"}
+    ALLOWED = {"whatsapp_enabled", "email_enabled", "whatsapp_to", "email_to",
+               "min_batch_size", "extra_recipients"}
     update = {k: v for k, v in (body or {}).items() if k in ALLOWED}
     if "email_to" in update and isinstance(update["email_to"], str):
         update["email_to"] = [e.strip() for e in update["email_to"].split(",") if e.strip()]

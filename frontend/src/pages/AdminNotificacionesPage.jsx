@@ -37,6 +37,7 @@ export default function AdminNotificacionesPage() {
         whatsapp_to: cfg.whatsapp_to || "",
         email_to: Array.isArray(cfg.email_to) ? cfg.email_to : [],
         min_batch_size: Number(cfg.min_batch_size || 1),
+        extra_recipients: (cfg.extra_recipients || []).filter((r) => r && (r.email || r.whatsapp)),
       };
       const { data } = await api.patch("/notif-contactos/config", body);
       setCfg(data);
@@ -230,6 +231,9 @@ export default function AdminNotificacionesPage() {
         </div>
       </section>
 
+      {/* Destinatarios adicionales (socios externos) */}
+      <ExtraRecipientsSection cfg={cfg} setCfg={setCfg}/>
+
       {/* Historial */}
       <section className="surface p-5" data-testid="history-section">
         <div className="flex items-center justify-between mb-3 border-b border-white/10 pb-2">
@@ -274,5 +278,103 @@ export default function AdminNotificacionesPage() {
         Sólo se notifican contactos con email o teléfono válido para evitar ruido.
       </div>
     </div>
+  );
+}
+
+function ExtraRecipientsSection({ cfg, setCfg }) {
+  const extras = cfg.extra_recipients || [];
+
+  const add = () => {
+    setCfg({
+      ...cfg,
+      extra_recipients: [
+        ...extras,
+        { name: "", whatsapp: "", email: "", intro_message: "" },
+      ],
+    });
+  };
+
+  const update = (idx, field, val) => {
+    const arr = [...extras];
+    arr[idx] = { ...arr[idx], [field]: val };
+    setCfg({ ...cfg, extra_recipients: arr });
+  };
+
+  const remove = (idx) => {
+    if (!window.confirm("¿Eliminar este destinatario?")) return;
+    setCfg({ ...cfg, extra_recipients: extras.filter((_, i) => i !== idx) });
+  };
+
+  return (
+    <section className="surface p-5 space-y-4" data-testid="extras-section">
+      <div className="flex items-center justify-between border-b border-white/10 pb-2">
+        <div>
+          <h2 className="text-lg font-bold">Destinatarios adicionales</h2>
+          <div className="text-[10px] text-zinc-500 font-mono mt-0.5">
+            Socios externos sin acceso al CRM · cada uno con saludo personalizado
+          </div>
+        </div>
+        <button onClick={add} className="btn-ghost text-xs" data-testid="add-extra-btn">
+          <Plus size={12} className="inline mr-1"/> Agregar destinatario
+        </button>
+      </div>
+
+      {extras.length === 0 ? (
+        <div className="text-center text-zinc-500 text-sm py-4">
+          — Sin destinatarios adicionales —
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {extras.map((r, idx) => (
+            <div key={idx} className="surface-elev p-3 space-y-2" data-testid={`extra-row-${idx}`}>
+              <div className="flex items-center justify-between">
+                <div className="label-overline text-[9px] text-amber-400">Destinatario #{idx + 1}</div>
+                <button onClick={() => remove(idx)} className="text-rose-400 hover:text-rose-300 text-[10px]">
+                  <Trash2 size={11} className="inline"/> Eliminar
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  value={r.name || ""}
+                  onChange={(e) => update(idx, "name", e.target.value)}
+                  placeholder="Nombre · Ej: Socio Maud"
+                  className="input-field text-xs"
+                  data-testid={`extra-name-${idx}`}
+                />
+                <input
+                  type="text"
+                  value={r.whatsapp || ""}
+                  onChange={(e) => update(idx, "whatsapp", e.target.value)}
+                  placeholder="whatsapp:+52442XXXXXXX"
+                  className="input-field font-mono text-xs"
+                  data-testid={`extra-wa-${idx}`}
+                />
+                <input
+                  type="email"
+                  value={r.email || ""}
+                  onChange={(e) => update(idx, "email", e.target.value)}
+                  placeholder="email@dominio.com"
+                  className="input-field font-mono text-xs col-span-2"
+                  data-testid={`extra-email-${idx}`}
+                />
+                <textarea
+                  value={r.intro_message || ""}
+                  onChange={(e) => update(idx, "intro_message", e.target.value)}
+                  placeholder="Mensaje de saludo personalizado · Ej: Ánimo socio, tenemos contactos recientes."
+                  rows={2}
+                  className="input-field text-xs col-span-2"
+                  data-testid={`extra-intro-${idx}`}
+                />
+              </div>
+              <div className="text-[10px] text-zinc-500 font-mono">
+                ⚠️ Si tu cuenta Twilio es Sandbox, este número debe enviar "join TU_CLAVE" al +1 415 523 8886 una vez para recibir WhatsApp.
+                El email no tiene restricción.
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
