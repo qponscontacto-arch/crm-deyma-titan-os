@@ -5,6 +5,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 import os
+import re
 import uuid
 import logging
 import asyncio
@@ -497,8 +498,18 @@ async def create_contacto(body: ContactoIn, user: dict = Depends(get_current_use
     doc = body.model_dump()
     doc["id"] = new_id()
     doc["created_at"] = iso(now_utc())
+    # Campos normalizados para dedupe + notificación push
+    doc["email_norm"] = _normalize_email(doc.get("email"))
+    doc["telefono_norm"] = _normalize_phone(doc.get("telefono"))
+    doc["fuente"] = doc.get("fuente") or "crm_manual"
     await db.contactos.insert_one(doc)
     doc.pop("_id", None)
+    # V5.4: notificación push (solo si tiene email o teléfono)
+    try:
+        if doc.get("email") or doc.get("telefono"):
+            await _notify_new_contacts_batch([doc], source="crm_manual")
+    except Exception as ne:
+        logger.warning(f"notif contacto manual falló: {ne}")
     return doc
 
 
@@ -5171,6 +5182,28 @@ async def _gf_run_pipeline(target_estados: List[str] = None, limite_senales: int
         }
         await db.gf_runs.insert_one(result)
         logger.info(f"[GREENFIELD][RUN {run_id}] ✅ {result['senales_nuevas_insertadas']} señales + {result['contactos_validados']} contactos")
+
+        # V5.4: sync a CRM Contactos + notificación push (solo contactos LinkedIn nuevos con email/tel)
+        try:
+            contacts_payload = [{
+                "nombre": c.get("nombre") or "",
+                "puesto": c.get("puesto") or c.get("rol") or "",
+                "empresa": c.get("empresa") or "",
+                "email": c.get("email"),
+                "telefono": c.get("telefono") or c.get("celular"),
+                "ciudad": c.get("ciudad") or "",
+                "linkedin": c.get("linkedin_url") or c.get("linkedin"),
+                "notas": "Detectado por Greenfield OSINT (LinkedIn + triangulación)",
+            } for c in sintesis["contactos_validos"]
+              if (c.get("email") or c.get("telefono") or c.get("celular"))]
+            new_in_crm = await _sync_contacts_to_crm(contacts_payload, source="greenfield_osint")
+            result["contactos_crm_nuevos"] = len(new_in_crm)
+            if new_in_crm:
+                notif = await _notify_new_contacts_batch(new_in_crm, source="greenfield_osint")
+                result["notificacion"] = notif
+        except Exception as ne:
+            logger.warning(f"[GREENFIELD][RUN {run_id}] notif/sync contactos falló: {ne}")
+
         return {k: v for k, v in result.items() if k != "_id"}
     except Exception as e:
         logger.exception(f"[GREENFIELD][RUN {run_id}] Error: {e}")
@@ -6244,6 +6277,26 @@ async def _dro_run_pipeline(target_estados: List[str] = None, limite: int = 8,
         }
         await db.dro_runs.insert_one(result)
         logger.info(f"[DRO][RUN {run_id}] ✅ {inserted} DROs + {tareas_creadas} tareas Alberto")
+
+        # V5.4: sync a CRM Contactos + notificación push (solo DROs nuevos con email/tel)
+        try:
+            contacts_payload = [{
+                "nombre": d["nombre"],
+                "puesto": "DRO · " + (d.get("especialidad") or "Civil"),
+                "empresa": d.get("colegio_agremiado") or (f"DRO {d.get('municipio') or d.get('estado_mx')}"),
+                "email": d.get("correo_electronico"),
+                "telefono": d.get("telefono_movil") or d.get("telefono_oficina"),
+                "ciudad": d.get("municipio") or d.get("estado_mx"),
+                "notas": f"Detectado por agente {d.get('fuente_agente','?')} · {d.get('url_documento_fuente','')}"
+            } for d in unicos if d.get("correo_electronico") or d.get("telefono_movil") or d.get("telefono_oficina")]
+            new_in_crm = await _sync_contacts_to_crm(contacts_payload, source="francotirador_dro")
+            result["contactos_crm_nuevos"] = len(new_in_crm)
+            if new_in_crm:
+                notif = await _notify_new_contacts_batch(new_in_crm, source="francotirador_dro")
+                result["notificacion"] = notif
+        except Exception as ne:
+            logger.warning(f"[DRO][RUN {run_id}] notif/sync contactos falló: {ne}")
+
         return {k: v for k, v in result.items() if k != "_id"}
     except Exception as e:
         logger.exception(f"[DRO][RUN {run_id}] Error: {e}")
@@ -6643,6 +6696,240 @@ async def centralizado_pdf(fecha: Optional[str] = None,
 
 # ============================================================================
 # FIN V5.3 · CENTRO DE MANDO DEL DÍA
+# ============================================================================
+
+
+# ============================================================================
+# V5.4 · NOTIFICACIONES PUSH DE CONTACTOS NUEVOS
+# Detecta contactos nuevos en cualquier flujo (Greenfield/DRO/Escuadrón/CRM
+# manual), los sincroniza en db.contactos con dedupe, y notifica al equipo
+# vía WhatsApp + Email (canales configurables).
+# ============================================================================
+
+NOTIF_CONFIG_KEY = "contact_notifications"  # documento único en db.system_config
+
+
+def _normalize_phone(p: Optional[str]) -> str:
+    if not p:
+        return ""
+    return re.sub(r"[^\d]", "", p).lstrip("0")
+
+
+def _normalize_email(e: Optional[str]) -> str:
+    return (e or "").strip().lower()
+
+
+async def _notif_get_config() -> dict:
+    """Configuración persistida. Defaults: WhatsApp+Email ON, destinatarios desde .env."""
+    cfg = await db.system_config.find_one({"key": NOTIF_CONFIG_KEY}, {"_id": 0})
+    if not cfg:
+        cfg = {
+            "key": NOTIF_CONFIG_KEY,
+            "whatsapp_enabled": True,
+            "email_enabled": True,
+            "whatsapp_to": DEYMA_ALERT_PHONE or "",
+            "email_to": [SENDGRID_FROM_EMAIL] if SENDGRID_FROM_EMAIL else [],
+            "min_batch_size": 1,  # avisa siempre, incluso 1 contacto
+            "updated_at": iso(now_utc()),
+        }
+        await db.system_config.insert_one({**cfg})
+    return cfg
+
+
+async def _sync_contacts_to_crm(contacts_raw: List[dict], source: str) -> List[dict]:
+    """Inserta contactos nuevos en db.contactos con dedupe por email/tel normalizados.
+    contacts_raw: [{nombre, telefono?, email?, empresa?, puesto?, ciudad?, linkedin?, ...}]
+    Retorna SOLO los que fueron realmente insertados (sin duplicados).
+    """
+    inserted = []
+    for c in contacts_raw:
+        nombre = (c.get("nombre") or "").strip()
+        if not nombre:
+            continue
+        email = _normalize_email(c.get("email"))
+        tel = _normalize_phone(c.get("telefono"))
+        if not (email or tel):
+            continue  # sin canal de contacto, no aporta
+        # dedupe
+        or_filters = []
+        if email:
+            or_filters.append({"email_norm": email})
+        if tel:
+            or_filters.append({"telefono_norm": tel})
+        if or_filters:
+            existing = await db.contactos.find_one({"$or": or_filters}, {"_id": 1})
+            if existing:
+                continue
+        doc = {
+            "id": new_id(),
+            "nombre": nombre,
+            "puesto": c.get("puesto") or "",
+            "empresa": c.get("empresa") or "",
+            "empresa_id": c.get("empresa_id") or None,
+            "email": c.get("email") or "",
+            "email_norm": email,
+            "telefono": c.get("telefono") or "",
+            "telefono_norm": tel,
+            "linkedin": c.get("linkedin") or "",
+            "ciudad": c.get("ciudad") or "",
+            "fuente": source,
+            "notas": c.get("notas") or "",
+            "created_at": iso(now_utc()),
+            "updated_at": iso(now_utc()),
+        }
+        await db.contactos.insert_one(doc)
+        inserted.append({k: v for k, v in doc.items() if k != "_id"})
+    return inserted
+
+
+async def _notify_new_contacts_batch(new_contacts: List[dict], source: str) -> dict:
+    """Envía WhatsApp + Email resumiendo lote de contactos nuevos.
+    No envía nada si la lista está vacía o si el canal está desactivado.
+    """
+    result = {"ok": True, "count": len(new_contacts), "source": source,
+              "wa_sent": False, "email_sent": False, "errors": []}
+    if not new_contacts:
+        return result
+    cfg = await _notif_get_config()
+    if len(new_contacts) < int(cfg.get("min_batch_size") or 1):
+        return result
+
+    src_label = {
+        "francotirador_dro": "Francotirador DRO",
+        "greenfield_osint": "Greenfield OSINT",
+        "escuadron_conversacional": "Escuadrón Conversacional",
+        "crm_manual": "CRM (alta manual)",
+        "cliente_aprobado": "Cliente aprobado",
+    }.get(source, source)
+
+    # --- WhatsApp ---
+    if cfg.get("whatsapp_enabled") and cfg.get("whatsapp_to"):
+        top = new_contacts[:5]
+        lines = [f"🆕 DEYMA RADAR · {len(new_contacts)} contacto{'s' if len(new_contacts) != 1 else ''} nuevo{'s' if len(new_contacts) != 1 else ''}",
+                 f"Fuente: {src_label}", ""]
+        for i, c in enumerate(top, 1):
+            who = c.get("nombre")
+            extra = []
+            if c.get("empresa"):
+                extra.append(c["empresa"])
+            if c.get("ciudad"):
+                extra.append(c["ciudad"])
+            ext = f" · {' · '.join(extra)}" if extra else ""
+            ch = c.get("email") or c.get("telefono") or "—"
+            lines.append(f"{i}. {who}{ext} → {ch}")
+        if len(new_contacts) > 5:
+            lines.append(f"… y {len(new_contacts) - 5} más en el CRM.")
+        lines.append("\nAbre el CRM → Contactos para dar seguimiento.")
+        body = "\n".join(lines)
+        wa_res = await send_whatsapp(cfg["whatsapp_to"], body)
+        result["wa_sent"] = bool(wa_res.get("sid") and not wa_res.get("mock"))
+        result["wa_status"] = wa_res.get("status") or wa_res.get("mock")
+        if wa_res.get("error"):
+            result["errors"].append(f"wa: {wa_res['error']}")
+
+    # --- Email ---
+    if cfg.get("email_enabled") and cfg.get("email_to"):
+        # tabla HTML
+        rows_html = []
+        for c in new_contacts[:50]:
+            rows_html.append(
+                f"<tr>"
+                f"<td style='padding:6px;border-bottom:1px solid #eee'><b>{c.get('nombre','')}</b><br/>"
+                f"<span style='color:#666;font-size:11px'>{c.get('puesto','') or '—'}</span></td>"
+                f"<td style='padding:6px;border-bottom:1px solid #eee;font-size:12px'>{c.get('empresa','') or '—'}<br/>"
+                f"<span style='color:#666;font-size:11px'>{c.get('ciudad','') or ''}</span></td>"
+                f"<td style='padding:6px;border-bottom:1px solid #eee;font-size:12px'>{c.get('email','') or '—'}</td>"
+                f"<td style='padding:6px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px'>{c.get('telefono','') or '—'}</td>"
+                f"</tr>"
+            )
+        html = (
+            f"<div style='font-family:sans-serif;max-width:760px'>"
+            f"<div style='color:#f59e0b;font-size:11px;letter-spacing:2px;text-transform:uppercase'>DEYMA · RADAR</div>"
+            f"<h2 style='margin:6px 0'>🆕 {len(new_contacts)} contacto{'s' if len(new_contacts) != 1 else ''} nuevo{'s' if len(new_contacts) != 1 else ''}</h2>"
+            f"<div style='color:#666;font-size:12px;margin-bottom:14px'>Fuente: <b>{src_label}</b> · "
+            f"{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}</div>"
+            f"<table style='width:100%;border-collapse:collapse;font-size:13px'>"
+            f"<thead><tr style='background:#0a0a0a;color:#fff'>"
+            f"<th style='padding:8px;text-align:left'>Nombre / Puesto</th>"
+            f"<th style='padding:8px;text-align:left'>Empresa / Ciudad</th>"
+            f"<th style='padding:8px;text-align:left'>Email</th>"
+            f"<th style='padding:8px;text-align:left'>Teléfono</th>"
+            f"</tr></thead><tbody>{''.join(rows_html)}</tbody></table>"
+            f"<div style='margin-top:18px;color:#666;font-size:11px;border-top:1px solid #eee;padding-top:10px'>"
+            f"DEYMA RADAR · Sistema de notificación automática · "
+            f"Configura tus preferencias en /admin/notificaciones</div>"
+            f"</div>"
+        )
+        subject = f"🆕 {len(new_contacts)} contacto{'s' if len(new_contacts) != 1 else ''} nuevo{'s' if len(new_contacts) != 1 else ''} · {src_label}"
+        recipients = cfg["email_to"] if isinstance(cfg["email_to"], list) else [cfg["email_to"]]
+        any_ok = False
+        for to in recipients:
+            sg_res = await send_email_sendgrid(to, subject, html, plain=None)
+            if sg_res.get("status") == "sent" or sg_res.get("status_code") in (200, 201, 202):
+                any_ok = True
+            elif sg_res.get("error"):
+                result["errors"].append(f"email[{to}]: {sg_res['error']}")
+        result["email_sent"] = any_ok
+
+    # Historial
+    await db.contact_notifications.insert_one({
+        "id": new_id(),
+        "source": source,
+        "source_label": src_label,
+        "count": len(new_contacts),
+        "wa_sent": result["wa_sent"],
+        "email_sent": result["email_sent"],
+        "sample_names": [c.get("nombre") for c in new_contacts[:5]],
+        "created_at": iso(now_utc()),
+        "errors": result["errors"],
+    })
+    return result
+
+
+# ----------------------------------------------------------------------------
+# Endpoints notificaciones de contactos
+# ----------------------------------------------------------------------------
+@api.get("/notif-contactos/config")
+async def notif_get_cfg(user: dict = Depends(require_roles("director", "socio"))):
+    cfg = await _notif_get_config()
+    return {k: v for k, v in cfg.items() if k not in ("_id",)}
+
+
+@api.patch("/notif-contactos/config")
+async def notif_patch_cfg(body: dict, user: dict = Depends(require_roles("director", "socio"))):
+    ALLOWED = {"whatsapp_enabled", "email_enabled", "whatsapp_to", "email_to", "min_batch_size"}
+    update = {k: v for k, v in (body or {}).items() if k in ALLOWED}
+    if "email_to" in update and isinstance(update["email_to"], str):
+        update["email_to"] = [e.strip() for e in update["email_to"].split(",") if e.strip()]
+    update["updated_at"] = iso(now_utc())
+    await db.system_config.update_one(
+        {"key": NOTIF_CONFIG_KEY},
+        {"$set": update}, upsert=True
+    )
+    return await notif_get_cfg(user)
+
+
+@api.get("/notif-contactos/historial")
+async def notif_historial(user: dict = Depends(require_roles("director", "socio"))):
+    return await db.contact_notifications.find({}, {"_id": 0}).sort("created_at", -1).to_list(50)
+
+
+@api.post("/notif-contactos/test")
+async def notif_test(user: dict = Depends(require_roles("director", "socio"))):
+    """Dispara una notificación de prueba con un contacto ficticio."""
+    fake = [{
+        "nombre": "Prueba · " + (user.get("name") or "Director"),
+        "puesto": "Test del sistema",
+        "empresa": "DEYMA Internal Test",
+        "ciudad": "Querétaro",
+        "email": user.get("email") or "didier.medina@deyma.com.mx",
+        "telefono": DEYMA_ALERT_PHONE.replace("whatsapp:", "") if DEYMA_ALERT_PHONE else "",
+    }]
+    return await _notify_new_contacts_batch(fake, source="crm_manual")
+
+
+# ============================================================================
+# FIN V5.4 · NOTIFICACIONES PUSH
 # ============================================================================
 
 
