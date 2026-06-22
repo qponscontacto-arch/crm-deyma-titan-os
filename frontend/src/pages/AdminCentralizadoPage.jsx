@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { api, formatApiError, API } from "../lib/auth";
+import ContactQuickActions from "../components/ContactQuickActions";
 import {
   Printer, Download, Flame, Briefcase, Map, Crosshair, Satellite,
   MessageSquare, FileText, RefreshCw, Loader2, ExternalLink, Calendar,
@@ -314,9 +315,18 @@ function FrancotiradorBlock({ items }) {
                 </td>
                 <td className="text-[10px] font-mono text-amber-400 print:text-black">{(d.stage || "").replace(/_/g, " ")}</td>
                 <td className="text-right">
-                  <Link to="/admin/francotirador-dro" className="text-[10px] text-amber-400 hover:underline print:hidden" data-print-hide>
-                    Contactar <ExternalLink size={9} className="inline"/>
-                  </Link>
+                  <div className="inline-flex items-center gap-2 print:hidden" data-print-hide>
+                    <ContactQuickActions
+                      tel={d.telefono_movil || d.telefono_oficina}
+                      email={d.correo_electronico}
+                      subject="DEYMA · Canastillas pasajuntas para sus obras"
+                      mensaje={d.plantilla_mensaje || `Estimado ${d.nombre}, le escribe DEYMA. Somos fabricantes especializados en canastillas pasajuntas para pavimentos industriales. Nos gustaría agendar una breve presentación técnica.`}
+                      testIdPrefix={`cqa-dro-${d.id}`}
+                    />
+                    <Link to="/admin/francotirador-dro" className="text-[10px] text-amber-400 hover:underline">
+                      Ver <ExternalLink size={9} className="inline"/>
+                    </Link>
+                  </div>
                 </td>
               </tr>
             ))}

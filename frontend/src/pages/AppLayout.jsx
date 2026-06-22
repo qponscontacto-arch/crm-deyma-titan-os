@@ -1,6 +1,7 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
+import CommsPanel from "../components/CommsPanel";
 import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus, Users2, Navigation, Wallet, Satellite, Crosshair, Briefcase } from "lucide-react";
 
 const NAV = [
@@ -83,6 +84,8 @@ export default function AppLayout() {
       <main className="flex-1 overflow-x-hidden">
         <Outlet />
       </main>
+
+      <CommsPanel />
     </div>
   );
 }

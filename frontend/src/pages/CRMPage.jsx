@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api, fmtMXN, formatApiError, SECTOR_LABEL, STAGE_LABEL, STAGE_ORDER } from "../lib/auth";
 import { Modal, Hotness, ScoreBar, StageBadge, EmptyState } from "../components/ui-deyma";
 import OpDetailModal from "../components/OpDetailModal";
+import ContactQuickActions from "../components/ContactQuickActions";
 import { Plus, Sparkles, Mail, Eye } from "lucide-react";
 
 export default function CRMPage() {
@@ -146,7 +147,7 @@ export default function CRMPage() {
         contactos.length === 0 ? <EmptyState title="Sin contactos" /> : (
           <div className="surface overflow-x-auto">
             <table className="dtable">
-              <thead><tr><th>Nombre</th><th>Puesto</th><th>Empresa</th><th>Email</th><th>Tel</th></tr></thead>
+              <thead><tr><th>Nombre</th><th>Puesto</th><th>Empresa</th><th>Email</th><th>Tel</th><th>Acciones</th></tr></thead>
               <tbody>
                 {contactos.map((c) => (
                   <tr key={c.id}>
@@ -155,6 +156,17 @@ export default function CRMPage() {
                     <td className="text-xs">{empName(c.empresa_id)}</td>
                     <td className="text-xs text-sky-400">{c.email}</td>
                     <td className="text-xs font-mono">{c.telefono}</td>
+                    <td>
+                      <ContactQuickActions
+                        tel={c.telefono}
+                        email={c.email}
+                        linkedin={c.linkedin}
+                        subject={`DEYMA · Seguimiento ${empName(c.empresa_id)}`}
+                        mensaje={`Hola ${c.nombre}, le escribe el equipo comercial de DEYMA. Quería darle seguimiento a la propuesta de canastillas pasajuntas para sus proyectos.`}
+                        size="sm"
+                        testIdPrefix={`cqa-cont-${c.id}`}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
