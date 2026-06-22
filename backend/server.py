@@ -6340,6 +6340,312 @@ async def dro_delete(did: str, user: dict = Depends(require_roles("director", "s
 # ============================================================================
 
 
+# ============================================================================
+# V5.3 · CENTRO DE MANDO DEL DÍA (CENTRALIZADO)
+# Resumen ejecutivo unificado de todas las herramientas de contacto.
+# Acceso restringido: director + socio.
+# ============================================================================
+
+require_centralizado = require_roles("director", "socio")
+
+
+async def _centralizado_payload(fecha_iso: str, user: dict) -> dict:
+    """Construye el JSON agregado del día con todas las herramientas de CONTACTO activas."""
+    try:
+        fecha_dt = datetime.fromisoformat(fecha_iso)
+    except Exception:
+        fecha_dt = datetime.now(timezone.utc)
+    dia_ini = fecha_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    dia_fin = dia_ini + timedelta(days=1)
+    h24_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+    d14_ago = datetime.now(timezone.utc) - timedelta(days=14)
+
+    # 1) ALERTAS HOT activas (score≥85, sin asignar o asignadas a "ver" hoy)
+    alertas_hot_raw = await db.oportunidades.find(
+        {"score": {"$gte": 85}, "stage": {"$nin": ["ganada", "perdida"]}},
+        {"_id": 0}
+    ).sort("score", -1).to_list(20)
+    # Enriquecer con nombre empresa
+    emp_ids = list({a.get("empresa_id") for a in alertas_hot_raw if a.get("empresa_id")})
+    emp_map = {}
+    if emp_ids:
+        async for e in db.empresas.find({"id": {"$in": emp_ids}}, {"_id": 0, "id": 1, "nombre": 1, "ciudad": 1}):
+            emp_map[e["id"]] = e
+    alertas_hot = []
+    for a in alertas_hot_raw:
+        emp = emp_map.get(a.get("empresa_id"), {})
+        alertas_hot.append({
+            **a,
+            "empresa_nombre": emp.get("nombre") or a.get("titulo") or "—",
+            "ciudad": emp.get("ciudad") or "—",
+        })
+
+    # 2) PIPELINE activo agregado (campo correcto: monto_estimado)
+    pipeline_pipeline = [
+        {"$match": {"stage": {"$nin": ["ganada", "perdida"]}}},
+        {"$group": {"_id": "$stage", "count": {"$sum": 1}, "monto": {"$sum": "$monto_estimado"}}},
+    ]
+    pipeline_raw = await db.oportunidades.aggregate(pipeline_pipeline).to_list(50)
+    STAGE_ORDER = ["prospeccion", "calificada", "propuesta", "negociacion"]
+    STAGE_LABEL = {"prospeccion": "Prospección", "calificada": "Calificada",
+                   "propuesta": "Propuesta", "negociacion": "Negociación"}
+    pipeline = []
+    pipeline_total = 0
+    for s in STAGE_ORDER:
+        row = next((x for x in pipeline_raw if x["_id"] == s), None)
+        c = row["count"] if row else 0
+        m = row["monto"] if row else 0
+        pipeline_total += m
+        pipeline.append({"key": s, "label": STAGE_LABEL[s], "count": c, "monto": m})
+
+    # 3) VISITAS PROGRAMADAS HOY (rutas del día, paradas no marcadas)
+    rutas_hoy = await db.rutas_ventas.find(
+        {"fecha": fecha_dt.strftime("%Y-%m-%d")},
+        {"_id": 0}
+    ).to_list(20)
+    visitas = []
+    for r in rutas_hoy:
+        for p in r.get("paradas", []) or []:
+            if not p.get("visita_status"):  # pendiente
+                visitas.append({
+                    "ruta_id": r.get("id"),
+                    "empresa_id": p.get("empresa_id"),
+                    "empresa": p.get("empresa"),
+                    "direccion": p.get("direccion") or p.get("ciudad"),
+                    "briefing": (p.get("briefing") or "")[:240],
+                    "vendedor": r.get("vendedor_nombre") or r.get("vendedor"),
+                })
+
+    # 4) FRANCOTIRADOR DRO pendientes (Blanco Detectado + Kit CAD Enviado)
+    dro_pend = await db.padron_dro.find(
+        {"stage": {"$in": ["blanco_detectado", "kit_cad_enviado"]}},
+        {"_id": 0}
+    ).sort("fecha_deteccion", -1).to_list(30)
+
+    # 5) GREENFIELD OSINT señales últimas 24h (campos correctos)
+    greenfield_24h = await db.radar.find(
+        {"is_greenfield": True, "detected_at": {"$gte": h24_ago.isoformat()}},
+        {"_id": 0}
+    ).sort("detected_at", -1).to_list(20)
+
+    # 6) ESCUADRÓN CONVERSACIONAL: intents últimos 24h con contacto
+    intents_24h = await db.osint_intents.find(
+        {"created_at": {"$gte": h24_ago.isoformat()}},
+        {"_id": 0}
+    ).sort("urgencia", -1).to_list(20)
+
+    # 7) COTIZACIONES esperando seguimiento (enviadas últimos 14 días, no ganadas/perdidas)
+    cotiz_seg = await db.cotizaciones.find(
+        {"created_at": {"$gte": d14_ago.isoformat()},
+         "estado": {"$nin": ["aceptada", "rechazada", "cancelada"]}},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(20)
+
+    return {
+        "fecha": dia_ini.strftime("%Y-%m-%d"),
+        "fecha_label": dia_ini.strftime("%A %d/%m/%Y"),
+        "generado_en": datetime.now(timezone.utc).isoformat(),
+        "usuario": {"name": user.get("name"), "role": user.get("role"), "email": user.get("email")},
+        "alertas_hot": alertas_hot,
+        "pipeline_total_mxn": pipeline_total,
+        "pipeline": pipeline,
+        "visitas_programadas": visitas,
+        "francotirador_pendientes": dro_pend,
+        "greenfield_24h": greenfield_24h,
+        "intents_24h": intents_24h,
+        "cotizaciones_seguimiento": cotiz_seg,
+        "totales": {
+            "alertas_hot": len(alertas_hot),
+            "visitas": len(visitas),
+            "dro": len(dro_pend),
+            "greenfield": len(greenfield_24h),
+            "intents": len(intents_24h),
+            "cotizaciones": len(cotiz_seg),
+        },
+    }
+
+
+@api.get("/centralizado/resumen")
+async def centralizado_resumen(fecha: Optional[str] = None,
+                                user: dict = Depends(require_centralizado)):
+    """JSON agregado del Centro de Mando del Día. fecha = YYYY-MM-DD, default hoy."""
+    if not fecha:
+        fecha = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return await _centralizado_payload(fecha, user)
+
+
+@api.get("/centralizado/pdf")
+async def centralizado_pdf(fecha: Optional[str] = None,
+                            user: dict = Depends(require_centralizado)):
+    """Genera PDF imprimible del Centro de Mando del Día."""
+    if not fecha:
+        fecha = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    data = await _centralizado_payload(fecha, user)
+
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    import io
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=LETTER,
+                            leftMargin=1.2 * cm, rightMargin=1.2 * cm,
+                            topMargin=1.2 * cm, bottomMargin=1.2 * cm,
+                            title=f"DEYMA · Centro de Mando {fecha}")
+    styles = getSampleStyleSheet()
+    AMBER = colors.HexColor("#f59e0b")
+    DARK = colors.HexColor("#0a0a0a")
+    GRAY = colors.HexColor("#52525b")
+    LIGHT = colors.HexColor("#f4f4f5")
+
+    h1 = ParagraphStyle("h1", parent=styles["Title"], fontSize=20, leading=24, textColor=DARK, alignment=TA_LEFT, spaceAfter=4)
+    overline = ParagraphStyle("ov", parent=styles["Normal"], fontSize=8, textColor=AMBER, alignment=TA_LEFT, spaceAfter=2)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=12, textColor=DARK, spaceBefore=10, spaceAfter=4)
+    body = ParagraphStyle("body", parent=styles["Normal"], fontSize=9, leading=11, textColor=DARK)
+    small = ParagraphStyle("sm", parent=body, fontSize=7, textColor=GRAY)
+    th_style = ParagraphStyle("th", parent=body, fontSize=8, textColor=colors.white, fontName="Helvetica-Bold")
+    cell = ParagraphStyle("cell", parent=body, fontSize=8, leading=10)
+
+    story = []
+
+    # Header
+    story.append(Paragraph("DEYMA · CENTRO DE MANDO DEL DÍA", overline))
+    story.append(Paragraph(f"Cierre {data['fecha_label']}", h1))
+    story.append(Paragraph(
+        f"Generado por {data['usuario'].get('name','')} ({data['usuario'].get('role','')}) · "
+        f"{datetime.fromisoformat(data['generado_en']).strftime('%d/%m/%Y %H:%M UTC')}", small))
+    story.append(Spacer(1, 8))
+
+    # KPI fila
+    t = data["totales"]
+    kpi = [[
+        Paragraph(f"<b>{t['alertas_hot']}</b><br/><font size=6>Alertas HOT</font>", cell),
+        Paragraph(f"<b>{t['visitas']}</b><br/><font size=6>Visitas hoy</font>", cell),
+        Paragraph(f"<b>{t['dro']}</b><br/><font size=6>DROs pendientes</font>", cell),
+        Paragraph(f"<b>{t['greenfield']}</b><br/><font size=6>Greenfield 24h</font>", cell),
+        Paragraph(f"<b>{t['intents']}</b><br/><font size=6>Intents 24h</font>", cell),
+        Paragraph(f"<b>{t['cotizaciones']}</b><br/><font size=6>Cotiz. seguim.</font>", cell),
+    ]]
+    tab = Table(kpi, colWidths=[3 * cm] * 6)
+    tab.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), LIGHT),
+        ("BOX", (0, 0), (-1, -1), 0.5, GRAY),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, GRAY),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(tab)
+    story.append(Spacer(1, 8))
+
+    def _section_table(rows, headers, col_widths):
+        head = [Paragraph(h, th_style) for h in headers]
+        body_rows = [[Paragraph(str(c), cell) for c in r] for r in rows]
+        ts = Table([head] + body_rows, colWidths=col_widths, repeatRows=1)
+        ts.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), DARK),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT]),
+            ("BOX", (0, 0), (-1, -1), 0.4, GRAY),
+            ("INNERGRID", (0, 0), (-1, -1), 0.2, GRAY),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("PADDING", (0, 0), (-1, -1), 4),
+        ]))
+        return ts
+
+    # 1) Alertas HOT
+    story.append(Paragraph("🔥 Alertas HOT activas (score ≥ 85)", h2))
+    if data["alertas_hot"]:
+        rows = [[a.get("score", "—"),
+                 a.get("empresa_nombre", "—"),
+                 (a.get("sector") or "—"),
+                 (a.get("ciudad") or "—"),
+                 f"$ {(a.get('monto_estimado') or 0):,.0f}"] for a in data["alertas_hot"][:15]]
+        story.append(_section_table(rows, ["Score", "Empresa", "Sector", "Ciudad", "Monto MXN"],
+                                    [1.5 * cm, 6.5 * cm, 3 * cm, 3 * cm, 4 * cm]))
+    else:
+        story.append(Paragraph("— Sin alertas HOT activas —", small))
+
+    # 2) Pipeline
+    story.append(Paragraph("💼 Pipeline activo", h2))
+    rows = [[p["label"], p["count"], f"$ {p['monto']:,.0f}"] for p in data["pipeline"]]
+    rows.append(["TOTAL", "", f"$ {data['pipeline_total_mxn']:,.0f}"])
+    story.append(_section_table(rows, ["Etapa", "Ops", "Monto MXN"],
+                                [6 * cm, 2 * cm, 10 * cm]))
+
+    # 3) Visitas
+    story.append(Paragraph("🗺️ Visitas programadas hoy (pendientes)", h2))
+    if data["visitas_programadas"]:
+        rows = [[v.get("empresa", "—"),
+                 (v.get("direccion") or "—"),
+                 v.get("vendedor", "—"),
+                 (v.get("briefing") or "")] for v in data["visitas_programadas"][:15]]
+        story.append(_section_table(rows, ["Empresa", "Dirección/Ciudad", "Vendedor", "Briefing"],
+                                    [4.5 * cm, 4 * cm, 3 * cm, 6.5 * cm]))
+    else:
+        story.append(Paragraph("— Sin visitas pendientes hoy —", small))
+
+    # 4) Francotirador DRO
+    story.append(Paragraph("🎯 Francotirador DRO · pendientes de contacto", h2))
+    if data["francotirador_pendientes"]:
+        rows = [[d.get("nombre", "—"),
+                 (d.get("especialidad") or "—"),
+                 f"{d.get('municipio') or '—'} · {d.get('estado_mx') or ''}",
+                 (d.get("correo_electronico") or d.get("telefono_movil") or "—"),
+                 d.get("stage", "—")] for d in data["francotirador_pendientes"][:15]]
+        story.append(_section_table(rows, ["DRO", "Esp.", "Ubicación", "Contacto", "Etapa"],
+                                    [4.5 * cm, 2 * cm, 4 * cm, 4 * cm, 3.5 * cm]))
+    else:
+        story.append(Paragraph("— Sin DROs pendientes —", small))
+
+    # 5) Greenfield + Intents
+    story.append(Paragraph("🛰️ Greenfield OSINT · señales últimas 24h", h2))
+    if data["greenfield_24h"]:
+        rows = [[g.get("titulo", "—"),
+                 g.get("sector", "—"),
+                 g.get("ciudad", "—"),
+                 g.get("score", "—"),
+                 f"$ {(g.get('monto_estimado') or 0):,.0f}"] for g in data["greenfield_24h"][:12]]
+        story.append(_section_table(rows, ["Señal", "Sector", "Ciudad", "Score", "Monto MXN"],
+                                    [6 * cm, 3 * cm, 3 * cm, 1.5 * cm, 4.5 * cm]))
+    else:
+        story.append(Paragraph("— Sin señales nuevas —", small))
+
+    # 6) Cotizaciones seguimiento
+    story.append(Paragraph("📄 Cotizaciones esperando seguimiento (últimos 14 días)", h2))
+    if data["cotizaciones_seguimiento"]:
+        rows = [[c.get("folio", "—"),
+                 c.get("cliente_nombre", "—"),
+                 c.get("proyecto_titulo", "—")[:30],
+                 f"$ {(c.get('total') or 0):,.0f}",
+                 (c.get("estado") or "enviada")] for c in data["cotizaciones_seguimiento"][:12]]
+        story.append(_section_table(rows, ["Folio", "Cliente", "Proyecto", "Total", "Estado"],
+                                    [3 * cm, 5 * cm, 4 * cm, 3 * cm, 3 * cm]))
+    else:
+        story.append(Paragraph("— Sin cotizaciones pendientes —", small))
+
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(
+        "Documento generado automáticamente por DEYMA RADAR · "
+        "Distribución restringida a Dirección General y Socios.", small))
+
+    doc.build(story)
+    buf.seek(0)
+    fn = f"deyma_centralizado_{fecha}.pdf"
+    return StreamingResponse(
+        buf, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fn}"'}
+    )
+
+
+# ============================================================================
+# FIN V5.3 · CENTRO DE MANDO DEL DÍA
+# ============================================================================
+
+
 # ----------------------------------------------------------------------------
 # Background scheduler (CDMX timezone)
 # ----------------------------------------------------------------------------
