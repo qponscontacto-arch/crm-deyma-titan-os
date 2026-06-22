@@ -2,7 +2,7 @@ import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import CommsPanel from "../components/CommsPanel";
-import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus, Users2, Navigation, Wallet, Satellite, Crosshair, Briefcase, BellRing } from "lucide-react";
+import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus, Users2, Navigation, Wallet, Satellite, Crosshair, Briefcase, BellRing, Shield } from "lucide-react";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testId: "nav-dashboard" },
@@ -11,6 +11,7 @@ const NAV = [
   { to: "/admin/francotirador-dro", label: "Francotirador DRO", icon: Crosshair, testId: "nav-francotirador-dro", roles: ["director", "socio", "comercial", "operaciones"] },
   { to: "/admin/centralizado", label: "Centralizado", icon: Briefcase, testId: "nav-centralizado", roles: ["director", "socio"] },
   { to: "/admin/notificaciones", label: "Notificaciones Push", icon: BellRing, testId: "nav-notificaciones", roles: ["director", "socio"] },
+  { to: "/admin/accesos", label: "Accesos · Usuarios", icon: Shield, testId: "nav-accesos", roles: ["director"] },
   { to: "/scraper", label: "Scraper Nocturno", icon: Bot, testId: "nav-scraper" },
   { to: "/crm", label: "CRM Comercial", icon: Users, testId: "nav-crm" },
   { to: "/cotizador", label: "Cotizador", icon: FileText, testId: "nav-cotizador" },

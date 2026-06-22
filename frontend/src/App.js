@@ -24,6 +24,7 @@ import AdminRadarGreenfieldPage from "@/pages/AdminRadarGreenfieldPage";
 import AdminFrancotiradorDROPage from "@/pages/AdminFrancotiradorDROPage";
 import AdminCentralizadoPage from "@/pages/AdminCentralizadoPage";
 import AdminNotificacionesPage from "@/pages/AdminNotificacionesPage";
+import AdminAccesosPage from "@/pages/AdminAccesosPage";
 
 function ProtectedStaff({ children }) {
   const { user, cliente, loading } = useAuth();
@@ -75,6 +76,7 @@ function App() {
               <Route path="admin/francotirador-dro" element={<AdminFrancotiradorDROPage />} />
               <Route path="admin/centralizado" element={<AdminCentralizadoPage />} />
               <Route path="admin/notificaciones" element={<AdminNotificacionesPage />} />
+              <Route path="admin/accesos" element={<AdminAccesosPage />} />
             </Route>
           </Routes>
         </AuthProvider>

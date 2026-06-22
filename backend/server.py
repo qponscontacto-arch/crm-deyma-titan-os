@@ -463,6 +463,127 @@ async def me(user: dict = Depends(get_current_user)):
 
 
 # ----------------------------------------------------------------------------
+# V5.5: GESTIÓN DE ACCESOS (solo Director)
+# Listar usuarios staff, crear, resetear contraseña, activar/desactivar, eliminar.
+# Las contraseñas NUNCA se devuelven en respuestas.
+# ----------------------------------------------------------------------------
+require_director_only = require_roles("director")
+
+STAFF_ROLES = ("director", "socio", "comercial", "operaciones", "marketing", "rh", "finanzas")
+
+
+@api.get("/accesos/usuarios")
+async def listar_usuarios_staff(user: dict = Depends(require_director_only)):
+    """Lista todos los usuarios staff. No incluye password_hash."""
+    cur = db.users.find(
+        {"role": {"$ne": "cliente"}},
+        {"_id": 0, "password_hash": 0}
+    ).sort("created_at", -1)
+    return await cur.to_list(500)
+
+
+class CrearUsuarioIn(BaseModel):
+    name: str
+    email: EmailStr
+    role: str
+    password: str
+    activo: bool = True
+
+
+@api.post("/accesos/usuarios")
+async def crear_usuario_staff(body: CrearUsuarioIn,
+                              user: dict = Depends(require_director_only)):
+    if body.role not in STAFF_ROLES:
+        raise HTTPException(400, f"Rol inválido. Permitidos: {', '.join(STAFF_ROLES)}")
+    if len(body.password) < 6:
+        raise HTTPException(400, "La contraseña debe tener al menos 6 caracteres")
+    existing = await db.users.find_one({"email": body.email.lower()})
+    if existing:
+        raise HTTPException(400, "Ya existe un usuario con ese email")
+    doc = {
+        "id": new_id(),
+        "name": body.name.strip(),
+        "email": body.email.lower(),
+        "role": body.role,
+        "password_hash": hash_password(body.password),
+        "activo": bool(body.activo),
+        "created_at": iso(now_utc()),
+        "created_by": user.get("id"),
+    }
+    await db.users.insert_one(doc)
+    doc.pop("password_hash", None)
+    doc.pop("_id", None)
+    return doc
+
+
+class ResetPasswordIn(BaseModel):
+    new_password: str
+
+
+@api.post("/accesos/usuarios/{uid}/reset-password")
+async def reset_password_usuario(uid: str, body: ResetPasswordIn,
+                                  user: dict = Depends(require_director_only)):
+    if len(body.new_password) < 6:
+        raise HTTPException(400, "La contraseña debe tener al menos 6 caracteres")
+    target = await db.users.find_one({"id": uid}, {"_id": 0, "email": 1, "role": 1})
+    if not target:
+        raise HTTPException(404, "Usuario no encontrado")
+    await db.users.update_one(
+        {"id": uid},
+        {"$set": {
+            "password_hash": hash_password(body.new_password),
+            "password_changed_at": iso(now_utc()),
+            "password_changed_by": user.get("id"),
+        }}
+    )
+    return {"ok": True, "email": target.get("email"), "message": "Contraseña actualizada"}
+
+
+class PatchUsuarioIn(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    activo: Optional[bool] = None
+
+
+@api.patch("/accesos/usuarios/{uid}")
+async def patch_usuario(uid: str, body: PatchUsuarioIn,
+                        user: dict = Depends(require_director_only)):
+    update = {}
+    if body.name is not None:
+        update["name"] = body.name.strip()
+    if body.role is not None:
+        if body.role not in STAFF_ROLES:
+            raise HTTPException(400, f"Rol inválido. Permitidos: {', '.join(STAFF_ROLES)}")
+        update["role"] = body.role
+    if body.activo is not None:
+        update["activo"] = bool(body.activo)
+    if not update:
+        raise HTTPException(400, "Nada que actualizar")
+    update["updated_at"] = iso(now_utc())
+    res = await db.users.update_one({"id": uid}, {"$set": update})
+    if not res.matched_count:
+        raise HTTPException(404, "Usuario no encontrado")
+    fresh = await db.users.find_one({"id": uid}, {"_id": 0, "password_hash": 0})
+    return fresh
+
+
+@api.delete("/accesos/usuarios/{uid}")
+async def eliminar_usuario(uid: str, user: dict = Depends(require_director_only)):
+    if uid == user.get("id"):
+        raise HTTPException(400, "No puedes eliminar tu propia cuenta")
+    target = await db.users.find_one({"id": uid}, {"_id": 0, "role": 1, "email": 1})
+    if not target:
+        raise HTTPException(404, "Usuario no encontrado")
+    if target.get("role") == "director":
+        # Prevenir eliminar al único director
+        count_dir = await db.users.count_documents({"role": "director"})
+        if count_dir <= 1:
+            raise HTTPException(400, "No puedes eliminar al único Director del sistema")
+    await db.users.delete_one({"id": uid})
+    return {"ok": True, "email": target.get("email")}
+
+
+# ----------------------------------------------------------------------------
 # CRM: Empresas, Contactos, Oportunidades
 # ----------------------------------------------------------------------------
 @api.get("/empresas", response_model=List[Empresa])

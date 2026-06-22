@@ -7,8 +7,8 @@ export default function LoginPage() {
   const { login, loginCliente } = useAuth();
   const nav = useNavigate();
   const [tab, setTab] = useState("staff");
-  const [email, setEmail] = useState("director@deyma.mx");
-  const [password, setPassword] = useState("Deyma2026!");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [dfnum, setDfnum] = useState("");
   const [clientPw, setClientPw] = useState("");
   const [err, setErr] = useState("");
@@ -114,12 +114,6 @@ export default function LoginPage() {
               </div>
               {err && <div className="border border-rose-500/60 bg-rose-500/10 text-rose-300 text-xs p-3 font-mono" data-testid="login-error">{err}</div>}
               <button type="submit" disabled={busy} data-testid="login-submit-btn" className="btn-primary w-full">{busy ? "Autenticando…" : "Acceder al radar"}</button>
-              <div className="border-t border-white/10 pt-4 space-y-1 font-mono text-[10px] text-zinc-500">
-                <div>▸ director@deyma.mx · Deyma2026!</div>
-                <div>▸ socio@deyma.mx · Socio2026!</div>
-                <div>▸ comercial@deyma.mx · Comercial2026!</div>
-                <div>▸ operaciones@deyma.mx · Operaciones2026!</div>
-              </div>
             </form>
           )}
 
