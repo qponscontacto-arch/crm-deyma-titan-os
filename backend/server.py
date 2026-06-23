@@ -6821,6 +6821,301 @@ async def centralizado_pdf(fecha: Optional[str] = None,
 
 
 # ============================================================================
+# V5.6 · PLAN DE CIERRE COMERCIAL (Director + Socio)
+# Vista ejecutiva con estrategia tactica de 7 días para alcanzar meta MXN.
+# ============================================================================
+
+require_plan_cierre = require_roles("director", "socio")
+
+
+def _scope_label(monto: float) -> str:
+    if monto >= 30_000_000: return "MEGA-CUENTA"
+    if monto >= 10_000_000: return "ESTRATÉGICA"
+    if monto >= 3_000_000:  return "GRANDE"
+    if monto >= 500_000:    return "MEDIA"
+    return "PEQUEÑA"
+
+
+def _canastillas_estimadas(monto: float, precio_unitario: float = 1000) -> int:
+    return int(monto / precio_unitario) if precio_unitario > 0 else 0
+
+
+@api.get("/plan-cierre/resumen")
+async def plan_cierre_resumen(
+    meta_mxn: float = 1_200_000,
+    precio_canastilla: float = 1000,
+    user: dict = Depends(require_plan_cierre),
+):
+    """Computa estrategia tactica para alcanzar la meta MXN.
+    Prioriza oportunidades por (score * monto), incluye cotizaciones esperando
+    seguimiento, y propone milestones día-a-día.
+    """
+    # 1) Oportunidades activas con cálculo de prioridad
+    ops_raw = await db.oportunidades.find(
+        {"stage": {"$nin": ["ganada", "perdida"]}},
+        {"_id": 0}
+    ).to_list(200)
+    # Enriquecer con nombre empresa
+    emp_ids = list({o.get("empresa_id") for o in ops_raw if o.get("empresa_id")})
+    emp_map = {}
+    if emp_ids:
+        async for e in db.empresas.find({"id": {"$in": emp_ids}}, {"_id": 0, "id": 1, "nombre": 1, "ciudad": 1, "sector": 1}):
+            emp_map[e["id"]] = e
+    ops = []
+    for o in ops_raw:
+        emp = emp_map.get(o.get("empresa_id"), {})
+        monto = o.get("monto_estimado") or 0
+        score = o.get("score") or 0
+        # filtro contra "TEST_" y montos triviales
+        if monto < 50_000 or "TEST_" in (o.get("titulo") or ""):
+            continue
+        ops.append({
+            **o,
+            "empresa_nombre": emp.get("nombre") or "—",
+            "ciudad": emp.get("ciudad") or "—",
+            "sector": emp.get("sector") or o.get("sector") or "—",
+            "prioridad_score": (score or 50) * monto / 1_000_000,  # weighted
+            "scope": _scope_label(monto),
+            "canastillas_estimadas": _canastillas_estimadas(monto, precio_canastilla),
+            "monto_para_meta_pct": round((meta_mxn / monto * 100) if monto > 0 else 0, 1),
+        })
+    ops.sort(key=lambda x: x["prioridad_score"], reverse=True)
+
+    # 2) Cotizaciones esperando seguimiento (no rechazada/ganada/cancelada)
+    cotiz = await db.cotizaciones.find(
+        {"estado": {"$nin": ["aceptada", "rechazada", "cancelada"]}},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(50)
+
+    # 3) Combinaciones que dan la meta (top 3 + cotizaciones)
+    top10 = ops[:10]
+    combinaciones = []
+    for o in top10[:5]:
+        monto = o.get("monto_estimado") or 0
+        if monto >= meta_mxn:
+            pct = round(meta_mxn / monto * 100, 1)
+            combinaciones.append({
+                "tipo": "single",
+                "label": f"Cerrar {pct}% de \"{o.get('titulo','')[:40]}\"",
+                "monto_objetivo": meta_mxn,
+                "monto_oportunidad": monto,
+                "pct_requerido": pct,
+                "canastillas": _canastillas_estimadas(meta_mxn, precio_canastilla),
+                "op_ids": [o.get("id")],
+            })
+
+    # 4) Plan de 7 días (acciones tácticas)
+    today = datetime.now(timezone.utc).date()
+    plan_dias = [
+        {
+            "dia": 1, "fecha": today.isoformat(), "titulo": "ARRANQUE — Cards calientes",
+            "acciones": [
+                f"Enviar las {len([c for c in cotiz if c.get('estado') == 'borrador'])} cotizaciones en borrador HOY (no esperar)",
+                f"Contactar al cliente #1 del pipeline (score más alto) por WhatsApp + Email",
+                f"Confirmar agenda de visita técnica para esta semana",
+                "Revisar el módulo Centralizado para ver alertas HOT del día",
+            ],
+            "responsable": "Director + Comercial",
+        },
+        {
+            "dia": 2, "fecha": (today + timedelta(days=1)).isoformat(),
+            "titulo": "Investigar contactos faltantes",
+            "acciones": [
+                "Para cada oportunidad sin teléfono/email: buscar en LinkedIn al PMI o jefe de obra",
+                "Cargar contactos detectados al CRM (CRM Comercial → Contactos)",
+                "Llamar a las 2-3 oportunidades en etapa 'Calificada'",
+            ],
+            "responsable": "Comercial (Alberto)",
+        },
+        {
+            "dia": 3, "fecha": (today + timedelta(days=2)).isoformat(),
+            "titulo": "Visitas técnicas y muestras",
+            "acciones": [
+                "Visitar 2 obras de las oportunidades en etapa 'Propuesta'",
+                "Llevar muestras físicas de canastillas + ficha técnica + lista de obras realizadas",
+                "Tomar fotos con el cliente (sirve para credibilidad en redes)",
+            ],
+            "responsable": "Comercial + Operaciones",
+        },
+        {
+            "dia": 4, "fecha": (today + timedelta(days=3)).isoformat(),
+            "titulo": "Seguimientos intensivos",
+            "acciones": [
+                "Re-contactar a TODAS las cotizaciones enviadas que llevan >7 días sin respuesta",
+                "Ofrecer descuentos por volumen (5-8%) o entrega expedita como cierre",
+                "Ejecutar barrida manual de Francotirador DRO para prescriptores nuevos",
+            ],
+            "responsable": "Director",
+        },
+        {
+            "dia": 5, "fecha": (today + timedelta(days=4)).isoformat(),
+            "titulo": "Cierre — entregar propuestas finales",
+            "acciones": [
+                "Mandar propuestas formales con condiciones de cierre a los 3 leads más calientes",
+                "Solicitar orden de compra firmada o anticipo",
+                "Activar Greenfield OSINT para nuevas obras detectadas esta semana",
+            ],
+            "responsable": "Director + Socio",
+        },
+        {
+            "dia": 6, "fecha": (today + timedelta(days=5)).isoformat(),
+            "titulo": "Negociación final",
+            "acciones": [
+                "Reunión presencial con cliente más probable de cierre",
+                "Firmar contrato o levantar OC",
+                "Plan logístico de entrega 1200 canastillas",
+            ],
+            "responsable": "Director",
+        },
+        {
+            "dia": 7, "fecha": (today + timedelta(days=6)).isoformat(),
+            "titulo": "FACTURACIÓN + repaso",
+            "acciones": [
+                "Facturar lo cerrado",
+                "Reunión semanal con socio Maud — revisar avance vs meta",
+                "Re-priorizar pipeline para próxima semana con nuevas barridas OSINT",
+            ],
+            "responsable": "Director + Socio",
+        },
+    ]
+
+    # Estadísticas
+    pipeline_total = sum((o.get("monto_estimado") or 0) for o in ops)
+    canastillas_target = _canastillas_estimadas(meta_mxn, precio_canastilla)
+
+    return {
+        "generado_en": iso(now_utc()),
+        "usuario": {"name": user.get("name"), "role": user.get("role")},
+        "meta": {
+            "monto_mxn": meta_mxn,
+            "precio_canastilla": precio_canastilla,
+            "canastillas_target": canastillas_target,
+            "plazo_dias": 7,
+        },
+        "pipeline": {
+            "total_ops": len(ops),
+            "monto_activo": pipeline_total,
+            "veces_meta": round(pipeline_total / meta_mxn, 1) if meta_mxn else 0,
+        },
+        "top_oportunidades": top10,
+        "cotizaciones_seguimiento": cotiz[:10],
+        "combinaciones_meta": combinaciones,
+        "plan_dias": plan_dias,
+        "plantillas": {
+            "whatsapp_cedis": (
+                "Buen día {nombre}, soy {director} de DEYMA, fabricantes especializados "
+                "en canastillas pasajuntas para CEDIS y centros logísticos. Vi que están "
+                "construyendo {proyecto}. Quiero compartirles ficha técnica + obras realizadas "
+                "(Coppel, Walmart, Amazon, Volkswagen). ¿Tendrá 10 minutos esta semana?"
+            ),
+            "whatsapp_industrial": (
+                "Buen día {nombre}, le escribe DEYMA. Especializados en canastillas pasajuntas "
+                "para pisos industriales de alta exigencia. Detectamos que están desarrollando "
+                "{proyecto}. Tenemos capacidad para 1200 canastillas con entrega expedita. "
+                "¿Le interesa que le envíe propuesta técnica?"
+            ),
+            "email_seguimiento": (
+                "Estimado/a {nombre},\n\nLe escribo para dar seguimiento a la cotización "
+                "{folio} enviada el {fecha}.\n\nEstamos disponibles para resolver dudas técnicas "
+                "o ajustar condiciones comerciales. Si requieren entrega prioritaria, podemos "
+                "agendarla con descuento por pronto pago.\n\n"
+                "Quedo atento.\n\n{director}\nDirector General · DEYMA"
+            ),
+        },
+    }
+
+
+@api.get("/plan-cierre/pdf")
+async def plan_cierre_pdf(meta_mxn: float = 1_200_000,
+                          precio_canastilla: float = 1000,
+                          user: dict = Depends(require_plan_cierre)):
+    """PDF imprimible del Plan Cierre para reuniones con socio."""
+    data = await plan_cierre_resumen(meta_mxn=meta_mxn, precio_canastilla=precio_canastilla, user=user)
+
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    import io
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=LETTER, leftMargin=1.2 * cm, rightMargin=1.2 * cm,
+                            topMargin=1.2 * cm, bottomMargin=1.2 * cm,
+                            title=f"DEYMA · Plan Cierre ${meta_mxn:,.0f}")
+    styles = getSampleStyleSheet()
+    AMBER = colors.HexColor("#f59e0b"); DARK = colors.HexColor("#0a0a0a")
+    GRAY = colors.HexColor("#52525b"); LIGHT = colors.HexColor("#f4f4f5")
+    h1 = ParagraphStyle("h1", parent=styles["Title"], fontSize=22, leading=26, textColor=DARK, alignment=TA_LEFT, spaceAfter=4)
+    overline = ParagraphStyle("ov", parent=styles["Normal"], fontSize=8, textColor=AMBER, spaceAfter=2)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=13, textColor=DARK, spaceBefore=12, spaceAfter=4)
+    body = ParagraphStyle("body", parent=styles["Normal"], fontSize=9, leading=11, textColor=DARK)
+    small = ParagraphStyle("sm", parent=body, fontSize=7, textColor=GRAY)
+    th_style = ParagraphStyle("th", parent=body, fontSize=8, textColor=colors.white, fontName="Helvetica-Bold")
+    cell = ParagraphStyle("cell", parent=body, fontSize=8, leading=10)
+
+    story = []
+    story.append(Paragraph("DEYMA · PLAN DE CIERRE COMERCIAL", overline))
+    story.append(Paragraph(f"Meta ${data['meta']['monto_mxn']:,.0f} MXN · {data['meta']['canastillas_target']:,} canastillas", h1))
+    story.append(Paragraph(f"Generado por {data['usuario']['name']} · {data['generado_en'][:19].replace('T',' ')} UTC", small))
+    story.append(Spacer(1, 8))
+
+    # KPI
+    kpi = [[
+        Paragraph(f"<b>${data['pipeline']['monto_activo']/1_000_000:.1f}M</b><br/><font size=6>Pipeline activo</font>", cell),
+        Paragraph(f"<b>{data['pipeline']['total_ops']}</b><br/><font size=6>Oportunidades</font>", cell),
+        Paragraph(f"<b>{data['pipeline']['veces_meta']}x</b><br/><font size=6>Veces la meta</font>", cell),
+        Paragraph(f"<b>{data['meta']['canastillas_target']:,}</b><br/><font size=6>Canastillas meta</font>", cell),
+    ]]
+    t = Table(kpi, colWidths=[4.5 * cm] * 4)
+    t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),LIGHT),("BOX",(0,0),(-1,-1),0.5,GRAY),
+                           ("INNERGRID",(0,0),(-1,-1),0.3,GRAY),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+                           ("ALIGN",(0,0),(-1,-1),"CENTER"),("PADDING",(0,0),(-1,-1),6)]))
+    story.append(t)
+
+    # Top oportunidades
+    story.append(Paragraph("🎯 TOP 10 oportunidades priorizadas (score × monto)", h2))
+    rows = [[
+        Paragraph(str(o.get("score","—")), cell),
+        Paragraph(o.get("titulo","")[:50], cell),
+        Paragraph(o.get("stage","—"), cell),
+        Paragraph(f"${(o.get('monto_estimado') or 0):,.0f}", cell),
+        Paragraph(f"{o.get('monto_para_meta_pct','—')}%", cell),
+    ] for o in data["top_oportunidades"][:10]]
+    head = [Paragraph(h, th_style) for h in ["Score","Proyecto","Etapa","Monto MXN","% para meta"]]
+    ts = Table([head] + rows, colWidths=[1.3*cm, 8.5*cm, 2.5*cm, 3*cm, 2.5*cm], repeatRows=1)
+    ts.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),DARK),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+                            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,LIGHT]),
+                            ("BOX",(0,0),(-1,-1),0.4,GRAY),("INNERGRID",(0,0),(-1,-1),0.2,GRAY),
+                            ("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),4)]))
+    story.append(ts)
+
+    # Plan 7 días
+    story.append(Paragraph("📅 PLAN TÁCTICO 7 DÍAS", h2))
+    for d in data["plan_dias"]:
+        story.append(Paragraph(f"<b>Día {d['dia']} — {d['fecha']} — {d['titulo']}</b> · <i>{d['responsable']}</i>", body))
+        for a in d["acciones"]:
+            story.append(Paragraph(f"  • {a}", cell))
+        story.append(Spacer(1, 3))
+
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("Documento estratégico · Distribución restringida: Dirección General y Socios", small))
+
+    doc.build(story)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="deyma_plan_cierre_{int(meta_mxn)}.pdf"'}
+    )
+
+
+# ============================================================================
+# FIN V5.6 · PLAN DE CIERRE
+# ============================================================================
+
+
+# ============================================================================
 # V5.4 · NOTIFICACIONES PUSH DE CONTACTOS NUEVOS
 # Detecta contactos nuevos en cualquier flujo (Greenfield/DRO/Escuadrón/CRM
 # manual), los sincroniza en db.contactos con dedupe, y notifica al equipo

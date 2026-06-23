@@ -25,6 +25,7 @@ import AdminFrancotiradorDROPage from "@/pages/AdminFrancotiradorDROPage";
 import AdminCentralizadoPage from "@/pages/AdminCentralizadoPage";
 import AdminNotificacionesPage from "@/pages/AdminNotificacionesPage";
 import AdminAccesosPage from "@/pages/AdminAccesosPage";
+import AdminPlanCierrePage from "@/pages/AdminPlanCierrePage";
 
 function ProtectedStaff({ children }) {
   const { user, cliente, loading } = useAuth();
@@ -77,6 +78,7 @@ function App() {
               <Route path="admin/centralizado" element={<AdminCentralizadoPage />} />
               <Route path="admin/notificaciones" element={<AdminNotificacionesPage />} />
               <Route path="admin/accesos" element={<AdminAccesosPage />} />
+              <Route path="admin/plan-cierre" element={<AdminPlanCierrePage />} />
             </Route>
           </Routes>
         </AuthProvider>
