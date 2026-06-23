@@ -26,6 +26,7 @@ import AdminCentralizadoPage from "@/pages/AdminCentralizadoPage";
 import AdminNotificacionesPage from "@/pages/AdminNotificacionesPage";
 import AdminAccesosPage from "@/pages/AdminAccesosPage";
 import AdminPlanCierrePage from "@/pages/AdminPlanCierrePage";
+import AdminIALeadsPage from "@/pages/AdminIALeadsPage";
 
 function ProtectedStaff({ children }) {
   const { user, cliente, loading } = useAuth();
@@ -79,6 +80,7 @@ function App() {
               <Route path="admin/notificaciones" element={<AdminNotificacionesPage />} />
               <Route path="admin/accesos" element={<AdminAccesosPage />} />
               <Route path="admin/plan-cierre" element={<AdminPlanCierrePage />} />
+              <Route path="admin/ia-leads" element={<AdminIALeadsPage />} />
             </Route>
           </Routes>
         </AuthProvider>

@@ -7116,6 +7116,202 @@ async def plan_cierre_pdf(meta_mxn: float = 1_200_000,
 
 
 # ============================================================================
+# V5.7 · INTEGRACIÓN OPP-DETECTOR · WEBHOOK IA LEADS + AUTO INVITACIÓN GRUPO
+# ============================================================================
+IA_LEADS_WEBHOOK_KEY = os.environ.get("IA_LEADS_WEBHOOK_KEY", "")
+WHATSAPP_GROUP_LINK = os.environ.get("WHATSAPP_GROUP_LINK", "")
+
+
+class IALeadWebhookIn(BaseModel):
+    empresa: str
+    contacto_nombre: Optional[str] = ""
+    contacto_puesto: Optional[str] = ""
+    telefono: Optional[str] = ""
+    email: Optional[str] = ""
+    ubicacion: Optional[str] = ""
+    oportunidad_url: Optional[str] = ""
+    notas_contexto: Optional[str] = ""
+
+
+@api.post("/v1/ia-leads", status_code=201)
+async def webhook_ia_leads(payload: IALeadWebhookIn, request: Request):
+    """Endpoint público con X-API-KEY. Recibe leads desde opp-detector y
+    deduplica por email/teléfono. Estatus inicial: prospecto_detectado_ia."""
+    incoming_key = request.headers.get("X-API-KEY") or request.headers.get("x-api-key")
+    if not IA_LEADS_WEBHOOK_KEY or incoming_key != IA_LEADS_WEBHOOK_KEY:
+        raise HTTPException(401, "API key inválida o ausente")
+
+    email_n = _normalize_email(payload.email)
+    tel_n = _normalize_phone(payload.telefono)
+    if not (email_n or tel_n):
+        raise HTTPException(400, "Se requiere al menos email o teléfono para deduplicar")
+
+    or_filters = []
+    if email_n: or_filters.append({"email_norm": email_n})
+    if tel_n:   or_filters.append({"telefono_norm": tel_n})
+    existing = await db.ia_leads.find_one({"$or": or_filters}, {"_id": 0}) if or_filters else None
+
+    now = iso(now_utc())
+    if existing:
+        # Append nota con timestamp
+        prev = existing.get("notas_contexto") or ""
+        appended = (prev + ("\n\n" if prev else "") +
+                    f"[{now[:19]}] {payload.notas_contexto or ''}").strip()
+        await db.ia_leads.update_one(
+            {"id": existing["id"]},
+            {"$set": {
+                "notas_contexto": appended,
+                "ultima_deteccion": now,
+                "ubicacion": payload.ubicacion or existing.get("ubicacion"),
+                "oportunidad_url": payload.oportunidad_url or existing.get("oportunidad_url"),
+                "veces_detectado": (existing.get("veces_detectado") or 1) + 1,
+            }}
+        )
+        return {"ok": True, "action": "updated", "id": existing["id"]}
+
+    doc = {
+        "id": new_id(),
+        "empresa": payload.empresa.strip(),
+        "contacto_nombre": (payload.contacto_nombre or "").strip(),
+        "contacto_puesto": (payload.contacto_puesto or "").strip(),
+        "telefono": payload.telefono or "",
+        "telefono_norm": tel_n,
+        "email": payload.email or "",
+        "email_norm": email_n,
+        "ubicacion": payload.ubicacion or "",
+        "oportunidad_url": payload.oportunidad_url or "",
+        "notas_contexto": (payload.notas_contexto or "").strip(),
+        "estado": "prospecto_detectado_ia",
+        "invitacion_enviada": False,
+        "invitacion_fecha": None,
+        "veces_detectado": 1,
+        "created_at": now,
+        "ultima_deteccion": now,
+    }
+    await db.ia_leads.insert_one(doc)
+    doc.pop("_id", None)
+
+    # Notificación push push al equipo (re-usa el batch existente)
+    try:
+        await _notify_new_contacts_batch([{
+            "nombre": doc["contacto_nombre"] or doc["empresa"],
+            "puesto": doc["contacto_puesto"],
+            "empresa": doc["empresa"],
+            "email": doc["email"],
+            "telefono": doc["telefono"],
+            "ciudad": doc["ubicacion"],
+        }], source="opp_detector_ia")
+    except Exception as e:
+        logger.warning(f"[IA-LEADS] notif falló: {e}")
+    return {"ok": True, "action": "created", "id": doc["id"]}
+
+
+@api.get("/ia-leads")
+async def list_ia_leads(
+    estado: Optional[str] = None,
+    user: dict = Depends(require_roles("director", "socio", "comercial")),
+):
+    q = {}
+    if estado: q["estado"] = estado
+    return await db.ia_leads.find(q, {"_id": 0}).sort("ultima_deteccion", -1).to_list(300)
+
+
+def _build_invitation_message(lead: dict) -> str:
+    nombre = lead.get("contacto_nombre") or lead.get("empresa") or "estimado/a"
+    ubicacion = lead.get("ubicacion") or "su zona"
+    link = WHATSAPP_GROUP_LINK or "https://chat.whatsapp.com/"
+    return (
+        f"Hola {nombre}, le saluda el equipo de DEYMA Desarrollo y Mantenimiento. "
+        f"Detectamos que están liderando proyectos de infraestructura en {ubicacion}. "
+        f"Lo invitamos a sumarse a nuestra Red de Macroproyectos Industriales en WhatsApp "
+        f"para acceder a stock inmediato de canastillas pasajuntas, acero estructural y "
+        f"servicios de obra civil en tiempo real. Es un canal exclusivo y silencioso "
+        f"(solo administradores publican). Asegure su acceso aquí: {link}"
+    )
+
+
+@api.post("/ia-leads/{lid}/invitar")
+async def invitar_ia_lead(lid: str, user: dict = Depends(require_roles("director", "socio", "comercial"))):
+    lead = await db.ia_leads.find_one({"id": lid}, {"_id": 0})
+    if not lead:
+        raise HTTPException(404, "Lead no encontrado")
+    if not (lead.get("telefono_norm") or lead.get("telefono")):
+        raise HTTPException(400, "Lead sin teléfono para enviar invitación")
+
+    msg = _build_invitation_message(lead)
+    tel_norm = lead.get("telefono_norm") or _normalize_phone(lead.get("telefono"))
+    # Twilio espera formato whatsapp:+E.164
+    to_wa = f"whatsapp:+{tel_norm}" if not tel_norm.startswith("+") else f"whatsapp:{tel_norm}"
+
+    wa_res = await send_whatsapp(to_wa, msg)
+    ok = bool(wa_res.get("sid") and not wa_res.get("mock"))
+
+    await db.ia_leads.update_one(
+        {"id": lid},
+        {"$set": {
+            "invitacion_enviada": ok,
+            "invitacion_fecha": iso(now_utc()),
+            "invitacion_status": wa_res.get("status") or wa_res.get("mock"),
+            "invitacion_error": wa_res.get("error"),
+            "invitacion_msg": msg,
+            "estado": "invitado_grupo" if ok else lead.get("estado"),
+            "invitada_por": user.get("id"),
+        }}
+    )
+    return {"ok": ok, "wa_status": wa_res.get("status"), "mock": wa_res.get("mock"),
+            "error": wa_res.get("error"), "message_sent": msg}
+
+
+@api.patch("/ia-leads/{lid}")
+async def update_ia_lead(lid: str, body: dict,
+                          user: dict = Depends(require_roles("director", "socio", "comercial"))):
+    ALLOWED = {"estado", "notas_contexto", "contacto_nombre", "contacto_puesto",
+               "telefono", "email", "ubicacion"}
+    update = {k: v for k, v in (body or {}).items() if k in ALLOWED}
+    if "email" in update: update["email_norm"] = _normalize_email(update["email"])
+    if "telefono" in update: update["telefono_norm"] = _normalize_phone(update["telefono"])
+    update["updated_at"] = iso(now_utc())
+    res = await db.ia_leads.update_one({"id": lid}, {"$set": update})
+    if not res.matched_count:
+        raise HTTPException(404, "Lead no encontrado")
+    return await db.ia_leads.find_one({"id": lid}, {"_id": 0})
+
+
+@api.delete("/ia-leads/{lid}")
+async def delete_ia_lead(lid: str, user: dict = Depends(require_roles("director", "socio"))):
+    await db.ia_leads.delete_one({"id": lid})
+    return {"ok": True}
+
+
+@api.get("/ia-leads/webhook-info")
+async def get_webhook_info(user: dict = Depends(require_roles("director"))):
+    """Solo director ve la API key + URL del webhook."""
+    base_url = os.environ.get("PUBLIC_BASE_URL", "https://opp-detector.emergent.host")
+    return {
+        "webhook_url": f"{base_url}/api/v1/ia-leads",
+        "api_key": IA_LEADS_WEBHOOK_KEY,
+        "header_name": "X-API-KEY",
+        "method": "POST",
+        "whatsapp_group_link": WHATSAPP_GROUP_LINK,
+        "example_payload": {
+            "empresa": "Constructora ABC",
+            "contacto_nombre": "Juan Pérez",
+            "contacto_puesto": "Gerente de Compras",
+            "telefono": "4421234567",
+            "email": "juan@abc.mx",
+            "ubicacion": "Querétaro, MX",
+            "oportunidad_url": "https://linkedin.com/in/...",
+            "notas_contexto": "Buscan proveedor de canastillas para nave industrial",
+        },
+    }
+
+
+# ============================================================================
+# FIN V5.7 · OPP-DETECTOR INTEGRATION
+# ============================================================================
+
+
+# ============================================================================
 # V5.4 · NOTIFICACIONES PUSH DE CONTACTOS NUEVOS
 # Detecta contactos nuevos en cualquier flujo (Greenfield/DRO/Escuadrón/CRM
 # manual), los sincroniza en db.contactos con dedupe, y notifica al equipo
