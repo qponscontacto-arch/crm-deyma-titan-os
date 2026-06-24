@@ -27,6 +27,11 @@ import AdminNotificacionesPage from "@/pages/AdminNotificacionesPage";
 import AdminAccesosPage from "@/pages/AdminAccesosPage";
 import AdminPlanCierrePage from "@/pages/AdminPlanCierrePage";
 import AdminIALeadsPage from "@/pages/AdminIALeadsPage";
+import CondoCazaLeadsPage from "@/pages/condo/CondoCazaLeadsPage";
+import CondoAlertasPage from "@/pages/condo/CondoAlertasPage";
+import CondoMegaPage from "@/pages/condo/CondoMegaPage";
+import CondoRedesPage from "@/pages/condo/CondoRedesPage";
+import CondoConfigPage from "@/pages/condo/CondoConfigPage";
 
 function ProtectedStaff({ children }) {
   const { user, cliente, loading } = useAuth();
@@ -81,6 +86,11 @@ function App() {
               <Route path="admin/accesos" element={<AdminAccesosPage />} />
               <Route path="admin/plan-cierre" element={<AdminPlanCierrePage />} />
               <Route path="admin/ia-leads" element={<AdminIALeadsPage />} />
+              <Route path="condo/caza-leads" element={<CondoCazaLeadsPage />} />
+              <Route path="condo/alertas" element={<CondoAlertasPage />} />
+              <Route path="condo/mega" element={<CondoMegaPage />} />
+              <Route path="condo/redes" element={<CondoRedesPage />} />
+              <Route path="condo/config" element={<CondoConfigPage />} />
             </Route>
           </Routes>
         </AuthProvider>

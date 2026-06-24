@@ -7606,6 +7606,566 @@ async def notif_test(user: dict = Depends(require_roles("director", "socio"))):
 # ============================================================================
 
 
+# ============================================================================
+# V6.0 · RADAR DE CONDOMINIOS (Prospección Automatizada)
+# 3 agentes IA: Sabueso (contactos), Analista (quejas), Infiltrado (grupos)
+# Geo: Querétaro · Manual + Cron nocturno (04:00 CDMX) · GPT-5.2 estima mega
+# ============================================================================
+
+CONDO_DEFAULT_CONFIG = {
+    "_id": "default",
+    "ciudades": ["Querétaro", "Corregidora", "El Marqués"],
+    "keywords_contactos": [
+        "administrador de condominio",
+        "administración de inmuebles",
+        "comité de colonos",
+        "mesa directiva",
+        "comité de vigilancia",
+    ],
+    "keywords_quejas": [
+        "CFE", "sin luz", "fuga de agua", "CEA",
+        "pésimo mantenimiento", "fraccionamiento", "privada", "coto",
+    ],
+    "keywords_grupos": [
+        'site:facebook.com "chat.whatsapp.com" "vecinos"',
+        'site:facebook.com "chat.whatsapp.com" "fraccionamiento"',
+        'site:t.me "vecinos" "querétaro"',
+    ],
+    "min_casas_mega": 200,
+    "activo": True,
+    "ultima_corrida": None,
+    "ultima_corrida_resumen": None,
+}
+
+
+async def _condo_get_config() -> dict:
+    cfg = await db.condo_config.find_one({"_id": "default"})
+    if not cfg:
+        await db.condo_config.insert_one(CONDO_DEFAULT_CONFIG.copy())
+        cfg = CONDO_DEFAULT_CONFIG.copy()
+    return cfg
+
+
+def _condo_safe_str(x) -> str:
+    return (x or "").strip() if isinstance(x, str) else ""
+
+
+def _condo_extract_phones(text: str) -> List[str]:
+    """Extract MX-style phone numbers from text."""
+    if not text:
+        return []
+    # 10-digit, sometimes with spaces/dashes/parens. Prefix 442 = Querétaro
+    pattern = re.compile(r"(?:\+?52[\s\-]?)?(?:\(?\d{2,3}\)?[\s\-]?)?\d{3,4}[\s\-]?\d{4}")
+    found = pattern.findall(text)
+    out = []
+    for f in found:
+        digits = re.sub(r"\D", "", f)
+        if 10 <= len(digits) <= 13:
+            out.append(digits[-10:])  # normalize to 10 digits
+    return list(set(out))
+
+
+def _condo_extract_emails(text: str) -> List[str]:
+    if not text:
+        return []
+    return list(set(re.findall(r"[\w\.\-_]+@[\w\.\-_]+\.\w+", text)))
+
+
+def _condo_extract_wa_links(text: str) -> List[str]:
+    if not text:
+        return []
+    return list(set(re.findall(r"https?://chat\.whatsapp\.com/[A-Za-z0-9]+", text)))
+
+
+def _condo_extract_tg_links(text: str) -> List[str]:
+    if not text:
+        return []
+    pattern = re.compile(r"https?://t\.me/(?:joinchat/)?[A-Za-z0-9_\-]+")
+    return list(set(pattern.findall(text)))
+
+
+# -------- Agente 1: El Sabueso (Scraper de Contactos) --------
+async def _condo_run_sabueso() -> dict:
+    """Busca administradores de condominios en Querétaro vía Apify Google Search,
+    extrae teléfonos/emails y los inserta como leads (con dedupe)."""
+    cfg = await _condo_get_config()
+    ciudades = cfg.get("ciudades", ["Querétaro"])
+    keywords = cfg.get("keywords_contactos", [])
+    inserted, updated, skipped = 0, 0, 0
+    errors = []
+
+    if not _osint_live_mode() or not APIFY_TOKEN:
+        return {"agente": "sabueso", "ok": False, "mock": True, "msg": "OSINT_MODE no live o sin APIFY_TOKEN"}
+
+    queries = []
+    for kw in keywords[:5]:
+        for city in ciudades[:3]:
+            queries.append(f'"{kw}" "{city}"')
+
+    for q in queries[:8]:  # cap to keep API costs reasonable
+        try:
+            results = await _apify_run_actor(
+                "apify/google-search-scraper",
+                {"queries": q, "resultsPerPage": 10, "maxPagesPerQuery": 1, "countryCode": "mx", "languageCode": "es"},
+                timeout_s=90,
+            )
+        except Exception as e:
+            errors.append(f"sabueso/{q}: {e}")
+            continue
+
+        # google-search-scraper returns 1 doc per query with `organicResults`
+        items = []
+        for r in results or []:
+            items.extend(r.get("organicResults", []) or [])
+
+        for it in items[:30]:
+            url = it.get("url", "")
+            title = _condo_safe_str(it.get("title"))
+            snippet = _condo_safe_str(it.get("description") or it.get("snippet"))
+            blob = f"{title} {snippet}"
+            phones = _condo_extract_phones(blob)
+            emails = _condo_extract_emails(blob)
+
+            if not phones and not emails and not url:
+                skipped += 1
+                continue
+
+            # Dedupe by url or first phone/email
+            dedupe_key = phones[0] if phones else (emails[0] if emails else url)
+            existing = await db.condo_leads.find_one({"dedupe_key": dedupe_key})
+            doc = {
+                "condominio_nombre": title[:160] or "(sin nombre)",
+                "ubicacion": ciudades[0] if ciudades else "Querétaro",
+                "contacto_nombre": title[:120],
+                "contacto_puesto": "Administrador / Mesa directiva",
+                "telefono": phones[0] if phones else "",
+                "telefonos_adicionales": phones[1:] if len(phones) > 1 else [],
+                "email": emails[0] if emails else "",
+                "source_url": url,
+                "urgencia": "medio",
+                "problema_principal": "—",
+                "num_casas_estimado": None,
+                "es_mega": False,
+                "estado": "nuevo",
+                "agente_origen": "sabueso",
+                "tags": ["administrador", "scraper"],
+                "notas": snippet[:500],
+                "veces_detectado": 1,
+                "ultima_deteccion": iso(now_utc()),
+                "dedupe_key": dedupe_key,
+            }
+            if existing:
+                await db.condo_leads.update_one(
+                    {"_id": existing["_id"]},
+                    {"$inc": {"veces_detectado": 1}, "$set": {"ultima_deteccion": iso(now_utc())}},
+                )
+                updated += 1
+            else:
+                doc["_id"] = new_id()
+                doc["fecha_deteccion"] = iso(now_utc())
+                await db.condo_leads.insert_one(doc)
+                inserted += 1
+
+    return {"agente": "sabueso", "ok": True, "inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors}
+
+
+# -------- Agente 2: El Analista de Riesgos (Monitor de Quejas) --------
+async def _condo_run_analista() -> dict:
+    """Busca quejas CFE/CEA en Twitter usando Apify, clasifica urgencia con GPT-5.2."""
+    await _condo_get_config()  # ensure config exists
+    inserted, skipped = 0, 0
+    errors = []
+
+    if not _osint_live_mode() or not APIFY_TOKEN:
+        return {"agente": "analista", "ok": False, "mock": True, "msg": "OSINT_MODE no live o sin APIFY_TOKEN"}
+
+    # Multi-query strategy: Twitter dorks
+    twitter_queries = [
+        '(CFE OR "sin luz") (fraccionamiento OR privada OR coto) querétaro',
+        '("CEA" OR "fuga de agua") (fraccionamiento OR privada) querétaro',
+        '"pésimo mantenimiento" (fraccionamiento OR privada) querétaro',
+        'to:CFEmx "fraccionamiento" querétaro',
+        'to:cea_qro fraccionamiento',
+    ]
+
+    raw_posts = []
+    for q in twitter_queries:
+        try:
+            res = await _apify_run_actor(
+                "apidojo/twitter-scraper-lite",
+                {"searchTerms": [q], "maxItems": 20, "lang": "es"},
+                timeout_s=120,
+            )
+            raw_posts.extend(res or [])
+        except Exception as e:
+            errors.append(f"analista/twitter/{q}: {e}")
+
+    if not raw_posts:
+        return {"agente": "analista", "ok": True, "inserted": 0, "skipped": 0, "errors": errors, "msg": "Sin resultados de Twitter"}
+
+    # Compact and pass to GPT-5.2 for classification
+    posts_for_llm = []
+    for p in raw_posts[:40]:
+        posts_for_llm.append({
+            "text": (p.get("text") or p.get("full_text") or "")[:280],
+            "url": p.get("url") or p.get("twitterUrl") or "",
+            "author": p.get("author", {}).get("userName") if isinstance(p.get("author"), dict) else (p.get("user", {}).get("screen_name") if isinstance(p.get("user"), dict) else ""),
+            "created_at": p.get("createdAt") or p.get("created_at") or "",
+        })
+
+    try:
+        llm_response = await _llm_call(
+            system=(
+                "Eres un analista OSINT especializado en quejas urbanas de Querétaro. "
+                "Te paso una lista de posts. Para cada uno DEBES devolver JSON con: "
+                "fraccionamiento (string, nombre del fraccionamiento si lo detectas o ''), "
+                "urgencia ('alto'|'medio'|'bajo'), "
+                "tipo ('luz'|'agua'|'seguridad'|'mantenimiento'|'otro'), "
+                "ubicacion (ciudad o '' si no detectas), "
+                "relevante (true/false: true SOLO si menciona fraccionamiento/privada/coto/condominio Y es queja real). "
+                "Devuelve un JSON array con un objeto por post EN EL MISMO ORDEN."
+            ),
+            user_text="POSTS:\n" + str(posts_for_llm),
+        )
+        parsed = _parse_json_block(llm_response)
+        if not isinstance(parsed, list):
+            parsed = []
+    except Exception as e:
+        errors.append(f"analista/llm: {e}")
+        parsed = []
+
+    for i, p in enumerate(posts_for_llm):
+        meta = parsed[i] if i < len(parsed) and isinstance(parsed[i], dict) else {}
+        if not meta.get("relevante"):
+            skipped += 1
+            continue
+        url = p.get("url") or ""
+        dedupe_key = url or f"{p.get('author','')}-{p.get('text','')[:80]}"
+        existing = await db.condo_alertas.find_one({"dedupe_key": dedupe_key})
+        if existing:
+            skipped += 1
+            continue
+        doc = {
+            "_id": new_id(),
+            "fecha": p.get("created_at") or iso(now_utc()),
+            "autor_handle": p.get("author") or "",
+            "plataforma": "twitter",
+            "texto": p.get("text", ""),
+            "url": url,
+            "fraccionamiento_detectado": meta.get("fraccionamiento", ""),
+            "ubicacion": meta.get("ubicacion", "") or "Querétaro",
+            "urgencia": meta.get("urgencia", "medio"),
+            "tipo": meta.get("tipo", "otro"),
+            "vinculado_a_lead_id": None,
+            "dedupe_key": dedupe_key,
+            "fecha_deteccion": iso(now_utc()),
+        }
+        await db.condo_alertas.insert_one(doc)
+        inserted += 1
+
+    return {"agente": "analista", "ok": True, "inserted": inserted, "skipped": skipped, "errors": errors}
+
+
+# -------- Agente 3: El Infiltrado (Buscador de Comunidades) --------
+async def _condo_run_infiltrado() -> dict:
+    """Google Dorking para encontrar links públicos de grupos WhatsApp/Telegram vecinales."""
+    cfg = await _condo_get_config()
+    dorks = cfg.get("keywords_grupos", [])
+    inserted, skipped = 0, 0
+    errors = []
+
+    if not _osint_live_mode() or not APIFY_TOKEN:
+        return {"agente": "infiltrado", "ok": False, "mock": True, "msg": "OSINT_MODE no live o sin APIFY_TOKEN"}
+
+    for dork in dorks[:6]:
+        try:
+            results = await _apify_run_actor(
+                "apify/google-search-scraper",
+                {"queries": dork, "resultsPerPage": 15, "maxPagesPerQuery": 1, "countryCode": "mx", "languageCode": "es"},
+                timeout_s=90,
+            )
+        except Exception as e:
+            errors.append(f"infiltrado/{dork}: {e}")
+            continue
+
+        items = []
+        for r in results or []:
+            items.extend(r.get("organicResults", []) or [])
+
+        for it in items[:30]:
+            src_url = it.get("url", "")
+            title = _condo_safe_str(it.get("title"))
+            snippet = _condo_safe_str(it.get("description") or it.get("snippet"))
+            blob = f"{title} {snippet} {src_url}"
+            wa_links = _condo_extract_wa_links(blob)
+            tg_links = _condo_extract_tg_links(blob)
+            for link in wa_links:
+                existing = await db.condo_grupos.find_one({"url": link})
+                if existing:
+                    skipped += 1
+                    continue
+                await db.condo_grupos.insert_one({
+                    "_id": new_id(),
+                    "fecha_deteccion": iso(now_utc()),
+                    "plataforma": "whatsapp",
+                    "url": link,
+                    "nombre_grupo": title[:160],
+                    "fraccionamiento": "",
+                    "source_url": src_url,
+                    "miembros_estimados": None,
+                    "notas": snippet[:300],
+                })
+                inserted += 1
+            for link in tg_links:
+                existing = await db.condo_grupos.find_one({"url": link})
+                if existing:
+                    skipped += 1
+                    continue
+                await db.condo_grupos.insert_one({
+                    "_id": new_id(),
+                    "fecha_deteccion": iso(now_utc()),
+                    "plataforma": "telegram",
+                    "url": link,
+                    "nombre_grupo": title[:160],
+                    "fraccionamiento": "",
+                    "source_url": src_url,
+                    "miembros_estimados": None,
+                    "notas": snippet[:300],
+                })
+                inserted += 1
+
+    return {"agente": "infiltrado", "ok": True, "inserted": inserted, "skipped": skipped, "errors": errors}
+
+
+# -------- GPT-5.2 estima si un lead es Mega-Condominio (>=200 casas) --------
+async def _condo_estimate_mega(lead: dict) -> dict:
+    """Usa GPT-5.2 para estimar el tamaño del condominio basándose en el nombre/snippet."""
+    try:
+        prompt = (
+            f"Condominio: {lead.get('condominio_nombre','')}\n"
+            f"Notas: {lead.get('notas','')[:400]}\n"
+            f"URL: {lead.get('source_url','')}\n\n"
+            "Estima el número aproximado de casas de este condominio/fraccionamiento basándote en el nombre y contexto. "
+            "Devuelve JSON: {\"casas\": int|null, \"confianza\": \"alta\"|\"media\"|\"baja\", \"razon\": \"...\"}"
+        )
+        raw = await _llm_call(
+            system="Eres experto en bienes raíces de Querétaro. Conoces los principales fraccionamientos.",
+            user_text=prompt,
+        )
+        parsed = _parse_json_block(raw)
+        casas = parsed.get("casas") if isinstance(parsed, dict) else None
+        return {
+            "num_casas_estimado": casas,
+            "es_mega": bool(casas and casas >= 200),
+            "confianza_estimacion": (parsed.get("confianza") if isinstance(parsed, dict) else "baja"),
+        }
+    except Exception:
+        return {"num_casas_estimado": None, "es_mega": False, "confianza_estimacion": "baja"}
+
+
+# -------- Pipeline completa (manual + cron) --------
+async def _condo_run_pipeline() -> dict:
+    started = now_utc()
+    r1 = await _condo_run_sabueso()
+    r2 = await _condo_run_analista()
+    r3 = await _condo_run_infiltrado()
+
+    # Tras Sabueso, intenta estimar mega para los leads nuevos sin estimación
+    try:
+        cursor = db.condo_leads.find({"num_casas_estimado": None, "agente_origen": "sabueso"}).limit(20)
+        async for lead in cursor:
+            est = await _condo_estimate_mega(lead)
+            await db.condo_leads.update_one({"_id": lead["_id"]}, {"$set": est})
+    except Exception:
+        logger.exception("[CONDO] estimate mega error")
+
+    resumen = {
+        "sabueso": r1, "analista": r2, "infiltrado": r3,
+        "started_at": iso(started), "ended_at": iso(now_utc()),
+    }
+    await db.condo_config.update_one(
+        {"_id": "default"},
+        {"$set": {"ultima_corrida": iso(now_utc()), "ultima_corrida_resumen": resumen}},
+        upsert=True,
+    )
+    return resumen
+
+
+# -------- Endpoints CRUD + Run --------
+condo_director_or_socio = require_roles("director", "socio", "comercial")
+
+
+@api.get("/condo/config")
+async def condo_get_config(user: dict = Depends(condo_director_or_socio)):
+    cfg = await _condo_get_config()
+    cfg.pop("_id", None)
+    return cfg
+
+
+@api.patch("/condo/config")
+async def condo_update_config(body: dict, user: dict = Depends(require_roles("director", "socio"))):
+    allowed = {"ciudades", "keywords_contactos", "keywords_quejas", "keywords_grupos", "min_casas_mega", "activo"}
+    upd = {k: v for k, v in body.items() if k in allowed}
+    if not upd:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+    await db.condo_config.update_one({"_id": "default"}, {"$set": upd}, upsert=True)
+    return await condo_get_config(user)
+
+
+@api.post("/condo/run")
+async def condo_run_all(user: dict = Depends(require_roles("director", "socio"))):
+    res = await _condo_run_pipeline()
+    return res
+
+
+@api.post("/condo/run/{agente}")
+async def condo_run_one(agente: str, user: dict = Depends(require_roles("director", "socio"))):
+    if agente == "sabueso":
+        return await _condo_run_sabueso()
+    if agente == "analista":
+        return await _condo_run_analista()
+    if agente == "infiltrado":
+        return await _condo_run_infiltrado()
+    raise HTTPException(status_code=404, detail="Agente desconocido")
+
+
+@api.get("/condo/leads")
+async def condo_list_leads(estado: str = "", urgencia: str = "", mega: str = "",
+                           user: dict = Depends(condo_director_or_socio)):
+    q = {}
+    if estado:
+        q["estado"] = estado
+    if urgencia:
+        q["urgencia"] = urgencia
+    if mega == "1":
+        q["es_mega"] = True
+    cursor = db.condo_leads.find(q).sort([("urgencia", -1), ("ultima_deteccion", -1)]).limit(500)
+    out = []
+    async for d in cursor:
+        d["id"] = d.pop("_id")
+        out.append(d)
+    return out
+
+
+@api.patch("/condo/leads/{lid}")
+async def condo_update_lead(lid: str, body: dict, user: dict = Depends(condo_director_or_socio)):
+    allowed = {"condominio_nombre", "contacto_nombre", "contacto_puesto", "telefono",
+               "email", "ubicacion", "urgencia", "problema_principal", "num_casas_estimado",
+               "es_mega", "estado", "notas", "tags"}
+    upd = {k: v for k, v in body.items() if k in allowed}
+    if "num_casas_estimado" in upd:
+        try:
+            upd["es_mega"] = bool(upd["num_casas_estimado"] and int(upd["num_casas_estimado"]) >= 200)
+        except Exception:
+            pass
+    if not upd:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+    r = await db.condo_leads.update_one({"_id": lid}, {"$set": upd})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    return {"ok": True}
+
+
+@api.delete("/condo/leads/{lid}")
+async def condo_delete_lead(lid: str, user: dict = Depends(require_roles("director", "socio"))):
+    r = await db.condo_leads.delete_one({"_id": lid})
+    return {"ok": r.deleted_count > 0}
+
+
+@api.post("/condo/leads/{lid}/promover-crm")
+async def condo_promover_a_crm(lid: str, user: dict = Depends(condo_director_or_socio)):
+    lead = await db.condo_leads.find_one({"_id": lid})
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    fake_contact = [{
+        "id": new_id(),
+        "empresa": lead.get("condominio_nombre", "Condominio"),
+        "nombre": lead.get("contacto_nombre", ""),
+        "puesto": lead.get("contacto_puesto", "Administrador"),
+        "telefono": lead.get("telefono", ""),
+        "email": lead.get("email", ""),
+        "ubicacion": lead.get("ubicacion", "Querétaro"),
+        "fuente": "radar_condominios",
+    }]
+    try:
+        new_in_crm = await _sync_contacts_to_crm(fake_contact, source="radar_condominios")
+    except Exception as e:
+        logger.exception("condo promover error")
+        raise HTTPException(status_code=500, detail=str(e))
+    await db.condo_leads.update_one({"_id": lid}, {"$set": {"estado": "contactado"}})
+    return {"ok": True, "promovidos": len(new_in_crm or [])}
+
+
+@api.get("/condo/alertas")
+async def condo_list_alertas(urgencia: str = "", tipo: str = "",
+                              user: dict = Depends(condo_director_or_socio)):
+    q = {}
+    if urgencia:
+        q["urgencia"] = urgencia
+    if tipo:
+        q["tipo"] = tipo
+    cursor = db.condo_alertas.find(q).sort([("fecha_deteccion", -1)]).limit(500)
+    out = []
+    async for d in cursor:
+        d["id"] = d.pop("_id")
+        out.append(d)
+    return out
+
+
+@api.delete("/condo/alertas/{aid}")
+async def condo_delete_alerta(aid: str, user: dict = Depends(require_roles("director", "socio"))):
+    r = await db.condo_alertas.delete_one({"_id": aid})
+    return {"ok": r.deleted_count > 0}
+
+
+@api.get("/condo/grupos")
+async def condo_list_grupos(plataforma: str = "", user: dict = Depends(condo_director_or_socio)):
+    q = {}
+    if plataforma:
+        q["plataforma"] = plataforma
+    cursor = db.condo_grupos.find(q).sort([("fecha_deteccion", -1)]).limit(500)
+    out = []
+    async for d in cursor:
+        d["id"] = d.pop("_id")
+        out.append(d)
+    return out
+
+
+@api.delete("/condo/grupos/{gid}")
+async def condo_delete_grupo(gid: str, user: dict = Depends(require_roles("director", "socio"))):
+    r = await db.condo_grupos.delete_one({"_id": gid})
+    return {"ok": r.deleted_count > 0}
+
+
+@api.get("/condo/stats")
+async def condo_stats(user: dict = Depends(condo_director_or_socio)):
+    leads_total = await db.condo_leads.count_documents({})
+    leads_mega = await db.condo_leads.count_documents({"es_mega": True})
+    alertas_alto = await db.condo_alertas.count_documents({"urgencia": "alto"})
+    alertas_total = await db.condo_alertas.count_documents({})
+    grupos_total = await db.condo_grupos.count_documents({})
+    grupos_wa = await db.condo_grupos.count_documents({"plataforma": "whatsapp"})
+    cfg = await _condo_get_config()
+    return {
+        "leads_total": leads_total,
+        "leads_mega": leads_mega,
+        "alertas_total": alertas_total,
+        "alertas_alto": alertas_alto,
+        "grupos_total": grupos_total,
+        "grupos_whatsapp": grupos_wa,
+        "ultima_corrida": cfg.get("ultima_corrida"),
+        "ultima_corrida_resumen": cfg.get("ultima_corrida_resumen"),
+        "osint_live": _osint_live_mode(),
+    }
+
+
+# ============================================================================
+# FIN V6.0 · RADAR DE CONDOMINIOS
+# ============================================================================
+
+
+
+
 # ----------------------------------------------------------------------------
 # Background scheduler (CDMX timezone)
 # ----------------------------------------------------------------------------
@@ -7642,6 +8202,16 @@ async def _scheduler_loop():
                 logger.info("[SCHEDULER] Running Greenfield OSINT pipeline")
                 await _gf_run_pipeline()
                 SCRAPER_STATE["_last_greenfield_day"] = today_key
+            # 04:00 CDMX → Radar de Condominios (3 agentes IA)
+            if cdmx_hour == 4 and SCRAPER_STATE.get("_last_condo_day") != today_key:
+                logger.info("[SCHEDULER] Running Radar de Condominios pipeline")
+                try:
+                    cfg_c = await _condo_get_config()
+                    if cfg_c.get("activo", True):
+                        await _condo_run_pipeline()
+                except Exception:
+                    logger.exception("Condo pipeline error")
+                SCRAPER_STATE["_last_condo_day"] = today_key
             # Cada hora (cdmx_min ~ 0-5) → Escuadrón Conversacional (Listening)
             listen_hour_key = f"{today_key}T{cdmx_hour:02d}"
             if SCRAPER_STATE.get("_last_listening_hour") != listen_hour_key:

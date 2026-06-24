@@ -1,0 +1,38 @@
+{
+  "summary": "V6.0 Radar de Condominios — full backend + frontend testing. Backend: 17 passed / 1 skipped (no leads in DB to validate mega autoflag — OSINT live returned 0 results as expected per agent context note). Frontend: 5 condo pages render correctly with empty states, all required data-testid present, sidebar group header '📡 RADAR DE CONDOMINIOS' visible with all 5 nav items, Config page shows 4 stat cards + OSINT LIVE status + Ejecutar TODO + Guardar buttons. No critical issues found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "PATCH /api/condo/leads/{id}", "issue": "Could not validate num_casas_estimado>=200 -> es_mega=true autoflag at runtime because no leads exist in DB (OSINT returned 0); code review of server.py:8056-8060 confirms logic is correct. Recommend main agent insert a seed lead for future regression validation."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v6_condo_radar.py",
+    "/app/test_reports/pytest/pytest_v6_condo_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Seed at least one condo_lead document so future regression runs can exercise the num_casas_estimado>=200 -> es_mega=true autoflag PATCH path end-to-end."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 8268 lines — exceeds the 700-line guideline. Strongly recommend splitting V6.0 RADAR DE CONDOMINIOS (lines 7607-8164) into a separate module (e.g., backend/routers/condo_radar.py).",
+    "_condo_extract_phones regex is overly permissive (matches 7+ digit sequences with optional country code) — may produce false positives from price/ID strings in snippets. Consider stricter MX phone validation (require 10 normalized digits AND prefix in a whitelist like 442, 55, etc.).",
+    "_condo_run_analista passes raw posts_for_llm as str(...) (line 7828). This is fragile; use json.dumps for stable LLM input and reliable JSON-array output parsing.",
+    "POST /api/condo/run (full pipeline) has no timeout/queue guard — three sequential live OSINT actors can take several minutes and block the worker. Consider moving to BackgroundTasks or a job queue.",
+    "DELETE /api/condo/alertas/{id} and /condo/grupos/{id} return 200 with ok=false for non-existent ids; standard REST would return 404. Minor consistency issue with /condo/leads/{id} PATCH which does raise 404."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v6_condo_radar.py (new)"
+  ],
+  "success_rate": {"backend": "94% (17/18, 1 legitimately skipped)", "frontend": "100%"},
+  "test_credentials": "director@deyma.mx / Deyma2026! (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None. condo_config 'default' document is auto-created by first GET. No leads/alertas/grupos seeded — OSINT live pipeline executed but Apify returned 0 organic results for Querétaro queries at test time (acknowledged in agent_to_agent_context_note).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend test file /app/backend/tests/test_v6_condo_radar.py covers config, run pipeline, leads CRUD, alertas, grupos, stats. The mega-autoflag PATCH test auto-skips when DB has no leads — once at least one lead exists it will validate the >=200 -> es_mega=true behavior. Frontend pages live under /condo/{caza-leads,alertas,mega,redes,config}; key data-testids: btn-run-sabueso, btn-run-analista, btn-run-infiltrado, btn-save-config, filter-estado, filter-urgencia.",
+  "rca of the issue": "N/A — no failures."
+}

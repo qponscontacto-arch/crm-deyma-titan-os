@@ -2,7 +2,7 @@ import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import CommsPanel from "../components/CommsPanel";
-import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus, Users2, Navigation, Wallet, Satellite, Crosshair, Briefcase, BellRing, Shield, Target, Webhook } from "lucide-react";
+import { LayoutDashboard, Radar, Users, FileText, Map, Hammer, LogOut, ChevronRight, Bell, ListTodo, Bot, UserPlus, Users2, Navigation, Wallet, Satellite, Crosshair, Briefcase, BellRing, Shield, Target, Webhook, Building2, AlertTriangle, Crown, Search, Settings } from "lucide-react";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testId: "nav-dashboard" },
@@ -12,6 +12,14 @@ const NAV = [
   { to: "/admin/centralizado", label: "Centralizado", icon: Briefcase, testId: "nav-centralizado", roles: ["director", "socio"] },
   { to: "/admin/plan-cierre", label: "Plan Cierre $1.2M", icon: Target, testId: "nav-plan-cierre", roles: ["director", "socio"] },
   { to: "/admin/ia-leads", label: "Detecciones IA", icon: Webhook, testId: "nav-ia-leads", roles: ["director", "socio", "comercial"] },
+  // --- Radar de Condominios (V6.0) ---
+  { groupHeader: "📡 Radar de Condominios" },
+  { to: "/condo/caza-leads", label: "Caza-Leads (Admins)", icon: Bot, testId: "nav-condo-leads", roles: ["director", "socio", "comercial"] },
+  { to: "/condo/alertas", label: "Alertas de Dolor", icon: AlertTriangle, testId: "nav-condo-alertas", roles: ["director", "socio", "comercial"] },
+  { to: "/condo/mega", label: "Mega-Condominios", icon: Crown, testId: "nav-condo-mega", roles: ["director", "socio", "comercial"] },
+  { to: "/condo/redes", label: "Redes Vecinales", icon: Building2, testId: "nav-condo-redes", roles: ["director", "socio", "comercial"] },
+  { to: "/condo/config", label: "Config. Agentes", icon: Settings, testId: "nav-condo-config", roles: ["director", "socio"] },
+  // --- /Radar de Condominios ---
   { to: "/admin/notificaciones", label: "Notificaciones Push", icon: BellRing, testId: "nav-notificaciones", roles: ["director", "socio"] },
   { to: "/admin/accesos", label: "Accesos · Usuarios", icon: Shield, testId: "nav-accesos", roles: ["director"] },
   { to: "/scraper", label: "Scraper Nocturno", icon: Bot, testId: "nav-scraper" },
@@ -34,7 +42,7 @@ export default function AppLayout() {
 
   const roleLabel = { director: "Director General", comercial: "Comercial", operaciones: "Operaciones", socio: "Socio" }[user?.role] || user?.role;
 
-  const visibleNav = NAV.filter((n) => !n.roles || n.roles.includes(user?.role));
+  const visibleNav = NAV.filter((n) => n.groupHeader || !n.roles || n.roles.includes(user?.role));
 
   return (
     <div className="min-h-screen flex bg-black">
@@ -49,23 +57,32 @@ export default function AppLayout() {
           </div>
         </div>
 
-        <nav className="flex-1 p-2 space-y-1">
-          {visibleNav.map((n) => (
-            <NavLink
-              key={n.to} to={n.to} end={n.to === "/"} data-testid={n.testId}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-2.5 text-sm transition-colors ${
-                  isActive
-                    ? "bg-amber-500/10 text-amber-400 border-l-2 border-amber-500"
-                    : "text-zinc-400 hover:text-zinc-100 hover:bg-white/5 border-l-2 border-transparent"
-                }`
-              }
-            >
-              <n.icon size={16} strokeWidth={1.5} />
-              <span className="flex-1">{n.label}</span>
-              <ChevronRight size={12} className="opacity-40" strokeWidth={1.5} />
-            </NavLink>
-          ))}
+        <nav className="flex-1 p-2 space-y-1 overflow-y-auto">
+          {visibleNav.map((n, idx) => {
+            if (n.groupHeader) {
+              return (
+                <div key={`grp-${idx}`} className="label-overline text-[9px] text-amber-400/80 px-3 pt-4 pb-1">
+                  {n.groupHeader}
+                </div>
+              );
+            }
+            return (
+              <NavLink
+                key={n.to} to={n.to} end={n.to === "/"} data-testid={n.testId}
+                className={({ isActive }) =>
+                  `flex items-center gap-3 px-3 py-2.5 text-sm transition-colors ${
+                    isActive
+                      ? "bg-amber-500/10 text-amber-400 border-l-2 border-amber-500"
+                      : "text-zinc-400 hover:text-zinc-100 hover:bg-white/5 border-l-2 border-transparent"
+                  }`
+                }
+              >
+                <n.icon size={16} strokeWidth={1.5} />
+                <span className="flex-1">{n.label}</span>
+                <ChevronRight size={12} className="opacity-40" strokeWidth={1.5} />
+              </NavLink>
+            );
+          })}
         </nav>
 
         <div className="divider" />
