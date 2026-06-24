@@ -7693,22 +7693,34 @@ async def _condo_run_sabueso() -> dict:
     keywords = cfg.get("keywords_contactos", [])
     inserted, updated, skipped = 0, 0, 0
     errors = []
+    raw_count = 0
 
     if not _osint_live_mode() or not APIFY_TOKEN:
         return {"agente": "sabueso", "ok": False, "mock": True, "msg": "OSINT_MODE no live o sin APIFY_TOKEN"}
 
+    # Queries más amplias: sin comillas exactas (Google las relaja)
+    # y dorks específicos para sacar contactos reales.
     queries = []
-    for kw in keywords[:5]:
-        for city in ciudades[:3]:
-            queries.append(f'"{kw}" "{city}"')
+    for city in ciudades[:3]:
+        # Búsqueda directa por sitio + keyword
+        queries.append(f"administrador condominio {city} telefono")
+        queries.append(f"administracion fraccionamiento {city} contacto")
+        queries.append(f'site:linkedin.com/in "administrador" "condominio" {city}')
+        queries.append(f'site:facebook.com "mesa directiva" {city} fraccionamiento')
+    # Y keywords extra del config
+    for kw in keywords[:3]:
+        queries.append(f"{kw} querétaro")
 
-    for q in queries[:8]:  # cap to keep API costs reasonable
+    for q in queries[:10]:  # cap to keep API costs reasonable
         try:
             results = await _apify_run_actor(
                 "apify/google-search-scraper",
-                {"queries": q, "resultsPerPage": 10, "maxPagesPerQuery": 1, "countryCode": "mx", "languageCode": "es"},
+                {"queries": q, "resultsPerPage": 10, "maxPagesPerQuery": 1,
+                 "countryCode": "mx", "languageCode": "es",
+                 "saveHtml": False, "saveHtmlToKeyValueStore": False},
                 timeout_s=90,
             )
+            logger.info(f"[CONDO SABUESO] q='{q[:60]}' → {len(results or [])} docs")
         except Exception as e:
             errors.append(f"sabueso/{q}: {e}")
             continue
@@ -7717,6 +7729,7 @@ async def _condo_run_sabueso() -> dict:
         items = []
         for r in results or []:
             items.extend(r.get("organicResults", []) or [])
+        raw_count += len(items)
 
         for it in items[:30]:
             url = it.get("url", "")
@@ -7766,7 +7779,8 @@ async def _condo_run_sabueso() -> dict:
                 await db.condo_leads.insert_one(doc)
                 inserted += 1
 
-    return {"agente": "sabueso", "ok": True, "inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors}
+    logger.info(f"[CONDO SABUESO] Total raw items: {raw_count} · inserted: {inserted} · updated: {updated}")
+    return {"agente": "sabueso", "ok": True, "raw_results": raw_count, "inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors}
 
 
 # -------- Agente 2: El Analista de Riesgos (Monitor de Quejas) --------
@@ -7779,13 +7793,15 @@ async def _condo_run_analista() -> dict:
     if not _osint_live_mode() or not APIFY_TOKEN:
         return {"agente": "analista", "ok": False, "mock": True, "msg": "OSINT_MODE no live o sin APIFY_TOKEN"}
 
-    # Multi-query strategy: Twitter dorks
+    # Multi-query strategy: Twitter dorks (más naturales, sin paréntesis complejos)
     twitter_queries = [
-        '(CFE OR "sin luz") (fraccionamiento OR privada OR coto) querétaro',
-        '("CEA" OR "fuga de agua") (fraccionamiento OR privada) querétaro',
-        '"pésimo mantenimiento" (fraccionamiento OR privada) querétaro',
-        'to:CFEmx "fraccionamiento" querétaro',
-        'to:cea_qro fraccionamiento',
+        "sin luz fraccionamiento querétaro",
+        "CFE fraccionamiento querétaro queja",
+        "fuga agua privada querétaro",
+        "CEA pésimo servicio querétaro",
+        "mantenimiento fraccionamiento querétaro",
+        "to:CFEmx querétaro fraccionamiento",
+        "to:cea_qro fraccionamiento",
     ]
 
     raw_posts = []
@@ -7793,13 +7809,15 @@ async def _condo_run_analista() -> dict:
         try:
             res = await _apify_run_actor(
                 "apidojo/twitter-scraper-lite",
-                {"searchTerms": [q], "maxItems": 20, "lang": "es"},
+                {"searchTerms": [q], "maxItems": 15, "lang": "es", "tweetLanguage": "es"},
                 timeout_s=120,
             )
+            logger.info(f"[CONDO ANALISTA] q='{q[:60]}' → {len(res or [])} tweets")
             raw_posts.extend(res or [])
         except Exception as e:
             errors.append(f"analista/twitter/{q}: {e}")
 
+    logger.info(f"[CONDO ANALISTA] Total raw posts: {len(raw_posts)}")
     if not raw_posts:
         return {"agente": "analista", "ok": True, "inserted": 0, "skipped": 0, "errors": errors, "msg": "Sin resultados de Twitter"}
 
@@ -7864,6 +7882,30 @@ async def _condo_run_analista() -> dict:
         await db.condo_alertas.insert_one(doc)
         inserted += 1
 
+    # Push consolidado al Director si hay alertas de urgencia ALTA nuevas
+    try:
+        cutoff = iso(now_utc() - timedelta(minutes=10))
+        alto_recientes = await db.condo_alertas.find({
+            "urgencia": "alto", "fecha_deteccion": {"$gte": cutoff},
+        }).limit(8).to_list(length=8)
+        if alto_recientes and DEYMA_ALERT_PHONE:
+            lines = ["🚨 DEYMA · DOLOR DETECTADO (Analista)", ""]
+            for a in alto_recientes:
+                fracc = a.get("fraccionamiento_detectado") or "?"
+                tipo = a.get("tipo", "otro")
+                txt = (a.get("texto") or "")[:120]
+                lines.append(f"• {tipo.upper()} · {fracc}")
+                lines.append(f"  \"{txt}\"")
+                if a.get("url"):
+                    lines.append(f"  {a['url']}")
+                lines.append("")
+            lines.append("Acción: contactar admin del fraccionamiento en <2h.")
+            body = "\n".join(lines)
+            await send_whatsapp(DEYMA_ALERT_PHONE, body[:1500])
+            logger.info(f"[CONDO ANALISTA] Push alto enviado: {len(alto_recientes)} alertas")
+    except Exception:
+        logger.exception("[CONDO ANALISTA] push alto error")
+
     return {"agente": "analista", "ok": True, "inserted": inserted, "skipped": skipped, "errors": errors}
 
 
@@ -7885,6 +7927,7 @@ async def _condo_run_infiltrado() -> dict:
                 {"queries": dork, "resultsPerPage": 15, "maxPagesPerQuery": 1, "countryCode": "mx", "languageCode": "es"},
                 timeout_s=90,
             )
+            logger.info(f"[CONDO INFILTRADO] dork='{dork[:60]}' → {len(results or [])} docs")
         except Exception as e:
             errors.append(f"infiltrado/{dork}: {e}")
             continue
@@ -8158,6 +8201,79 @@ async def condo_stats(user: dict = Depends(condo_director_or_socio)):
         "ultima_corrida_resumen": cfg.get("ultima_corrida_resumen"),
         "osint_live": _osint_live_mode(),
     }
+
+
+# -------- Seed Mega-Condominios Querétaro (datos manuales reales) --------
+CONDO_SEED_QRO = [
+    {"nombre": "Juriquilla La Vista", "casas": 480, "zona": "Juriquilla, Querétaro",
+     "notas": "Fraccionamiento residencial premium en Juriquilla. >450 casas y casas-club."},
+    {"nombre": "Zibatá", "casas": 1200, "zona": "El Marqués, Querétaro",
+     "notas": "Macro-desarrollo de 1,000+ viviendas con campo de golf y centro comercial. Múltiples privadas."},
+    {"nombre": "El Refugio", "casas": 850, "zona": "Querétaro Norte",
+     "notas": "Uno de los fraccionamientos más grandes del norte de Querétaro. Múltiples privadas."},
+    {"nombre": "Cumbres del Lago Juriquilla", "casas": 380, "zona": "Juriquilla, Querétaro",
+     "notas": "Premium residencial con lago artificial y áreas comunes amplias."},
+    {"nombre": "Hacienda Real Tejeda", "casas": 260, "zona": "Corregidora, Querétaro",
+     "notas": "Hacienda residencial con casona principal y áreas verdes extensivas."},
+    {"nombre": "Punta Juriquilla", "casas": 220, "zona": "Juriquilla, Querétaro",
+     "notas": "Conjunto residencial cerrado con club deportivo."},
+    {"nombre": "Cañadas del Lago", "casas": 340, "zona": "Corregidora, Querétaro",
+     "notas": "Fraccionamiento residencial con lago artificial."},
+    {"nombre": "Residencial El Campanario", "casas": 600, "zona": "Querétaro Centro-Sur",
+     "notas": "Country club residencial premium con campo de golf y casa-club. Múltiples secciones."},
+    {"nombre": "Vista Real Country Club", "casas": 420, "zona": "Corregidora, Querétaro",
+     "notas": "Residencial premium con country club y campo de golf."},
+    {"nombre": "Altos Juriquilla", "casas": 280, "zona": "Juriquilla, Querétaro",
+     "notas": "Residencial cerrado en la zona alta de Juriquilla."},
+    {"nombre": "Real de Juriquilla", "casas": 510, "zona": "Juriquilla, Querétaro",
+     "notas": "Macro fraccionamiento de Ruba con múltiples privadas y amenidades."},
+    {"nombre": "El Mirador Querétaro", "casas": 320, "zona": "El Marqués, Querétaro",
+     "notas": "Fraccionamiento con vista a la sierra. Casas premium."},
+]
+
+
+@api.post("/condo/seed-mega")
+async def condo_seed_mega(user: dict = Depends(require_roles("director", "socio"))):
+    """Inserta de forma idempotente la lista curada de mega-condominios de Querétaro.
+    Útil como base de comparación inmediata para el equipo comercial."""
+    inserted, updated = 0, 0
+    for entry in CONDO_SEED_QRO:
+        dedupe_key = f"seed:{entry['nombre'].lower()}"
+        existing = await db.condo_leads.find_one({"dedupe_key": dedupe_key})
+        doc = {
+            "condominio_nombre": entry["nombre"],
+            "ubicacion": entry["zona"],
+            "contacto_nombre": "",
+            "contacto_puesto": "Administrador / Mesa directiva",
+            "telefono": "",
+            "telefonos_adicionales": [],
+            "email": "",
+            "source_url": "",
+            "urgencia": "medio",
+            "problema_principal": "—",
+            "num_casas_estimado": entry["casas"],
+            "es_mega": entry["casas"] >= 200,
+            "confianza_estimacion": "alta",
+            "estado": "nuevo",
+            "agente_origen": "seed_manual",
+            "tags": ["mega", "seed", "querétaro"],
+            "notas": entry["notas"],
+            "veces_detectado": 1,
+            "ultima_deteccion": iso(now_utc()),
+            "dedupe_key": dedupe_key,
+        }
+        if existing:
+            await db.condo_leads.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"num_casas_estimado": entry["casas"], "es_mega": entry["casas"] >= 200, "notas": entry["notas"]}}
+            )
+            updated += 1
+        else:
+            doc["_id"] = new_id()
+            doc["fecha_deteccion"] = iso(now_utc())
+            await db.condo_leads.insert_one(doc)
+            inserted += 1
+    return {"ok": True, "inserted": inserted, "updated": updated, "total": len(CONDO_SEED_QRO)}
 
 
 # ============================================================================

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { api, formatApiError } from "../../lib/auth";
 import {
   Settings, Save, Play, Loader2, CheckCircle2, AlertOctagon,
-  Bot, Radar, Zap, Search,
+  Bot, Radar, Zap, Search, Crown,
 } from "lucide-react";
 
 function ArrayEditor({ label, items, onChange, placeholder, mono = false }) {
@@ -75,6 +75,17 @@ export default function CondoConfigPage() {
     finally { setRunning(false); }
   };
 
+  const seedQro = async () => {
+    if (!window.confirm("¿Cargar los 12 mega-condominios curados de Querétaro como base inicial?")) return;
+    setRunning(true);
+    try {
+      const { data } = await api.post("/condo/seed-mega");
+      setNotice({ kind: "ok", msg: `✓ Seed Querétaro: ${data.inserted} nuevos · ${data.updated} actualizados` });
+      load();
+    } catch (e) { setNotice({ kind: "err", msg: formatApiError(e) }); }
+    finally { setRunning(false); }
+  };
+
   if (!cfg) return (
     <div className="p-8 text-center text-zinc-500"><Loader2 size={16} className="inline animate-spin mr-2"/>Cargando configuración…</div>
   );
@@ -90,7 +101,10 @@ export default function CondoConfigPage() {
             Configuración de Agentes
           </h1>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
+          <button onClick={seedQro} disabled={running} className="btn-ghost text-xs disabled:opacity-50" data-testid="btn-seed-qro">
+            <Crown size={12} className="inline mr-1"/>Seed Mega QRO
+          </button>
           <button onClick={runAll} disabled={running} className="btn-ghost text-xs disabled:opacity-50" data-testid="btn-run-all">
             {running ? <Loader2 size={12} className="inline mr-1 animate-spin"/> : <Play size={12} className="inline mr-1"/>}
             Ejecutar TODO
