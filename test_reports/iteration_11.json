@@ -1,0 +1,48 @@
+{
+  "summary": "Verified director login fix end-to-end after MongoDB bcrypt password reset. Backend auth + protected endpoints + full UI login flow all working. 5/5 pytest tests passed; UI login → dashboard → /admin/ia-leads navigation works without errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_director_auth.py",
+    "/app/test_reports/pytest/pytest_iteration11_director_auth.xml"
+  ],
+  "verified_flows": [
+    "POST /api/auth/login with director@deyma.mx + Deyma2026! → 200 with valid access_token, user.role='director', active=true, failed_attempts=0, locked_until=null",
+    "POST /api/auth/login with wrong password → 401 'Credenciales inválidas' (no token leak)",
+    "GET /api/condo/stats with Bearer token → 200 (returns leads_total=67, leads_mega=13, etc.)",
+    "GET /api/condo/stats without token → 401/403 (auth guard works)",
+    "UI: navigate to preview URL → Staff DEYMA tab (default) → fill creds → submit 'ACCEDER AL RADAR' → redirects to '/' dashboard",
+    "UI: sidebar shows 'DEYMA · RADAR' branding correctly",
+    "UI: nav-ia-leads sidebar item visible; click navigates to /admin/ia-leads, page renders without errors",
+    "GET /api/ia-leads with director token → 200 (list endpoint)"
+  ],
+  "action_items": [
+    "INFO (not a blocker): The review request stated 2 IA leads ('Constructora Quetzal del Bajío SA' and 'Edificadora Industrial Pavón') should be visible at /admin/ia-leads. The DB currently contains only 1 lead: 'Constructora del Bajío SA'. This is NOT related to the auth fix — login flow is fully working. Main agent should verify whether the expected webhook seeding ran on this preview env or whether dedup merged the records.",
+    "INFO: /app/memory/test_credentials.md says the tab is 'STAFF INTERNO' but the actual UI text is 'Staff DEYMA' (data-testid=tab-staff). Consider updating the doc for accuracy. Staff tab is the default selection, so no click is strictly required."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 7400+ lines — should be split into routers/modules (auth, ia_leads, condo, etc.) for maintainability. Not blocking but accumulating tech debt.",
+    "Login response correctly excludes password_hash and returns sanitized user object — good.",
+    "Wrong-password response correctly returns 401 with generic 'Credenciales inválidas' message (no user enumeration leak) — good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_director_auth.py (new regression test, 5 tests, all pass)"
+  ],
+  "success_rate": {
+    "backend": "100% (5/5)",
+    "frontend": "100% (login → dashboard → ia-leads navigation all work)"
+  },
+  "test_credentials": "Email: director@deyma.mx | Password: Deyma2026! | Role: director (confirmed working on preview env)",
+  "seed_data_creation": "None created. Existing data was used.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Director auth fully verified after the bcrypt password reset. Regression test lives at /app/backend/tests/test_director_auth.py. The IA Leads admin page exists at /admin/ia-leads (sidebar testid 'nav-ia-leads'). Default login tab is 'staff' (testid 'tab-staff'); button is data-testid='login-submit-btn' with text 'Acceder al radar' / 'ACCEDER AL RADAR'. After login the SPA redirects to '/' which renders the Dashboard with full sidebar branding 'DEYMA · RADAR · V1.0 · 2026'. Note that only 1 IA lead exists in DB ('Constructora del Bajío SA'), not the 2 expected by the request — flag if user reports missing leads.",
+  "rca_of_the_issue": "Original user complaint 'no quiere abrir' for director@deyma.mx was caused by an unknown stale password_hash/lockout state in MongoDB. Main agent fix (bcrypt reset of password_hash, failed_attempts=0, locked_until=null) is verified working: 200 OK on login, valid JWT issued, role=director returned, protected endpoints (/api/condo/stats) accessible with the token, full UI flow reaches dashboard. No code changes were needed."
+}
