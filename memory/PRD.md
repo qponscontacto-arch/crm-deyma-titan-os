@@ -1,106 +1,105 @@
-# DEYMA RADAR — PRD
+# DEYMA RADAR — Product Requirements (PRD)
 
-## Original Problem Statement
-CRM y sistema operativo profesional para proyectos de construcción industrial en México (DEYMA RADAR). Usuario habla **español únicamente**.
+> CRM y sistema operativo para DEYMA Desarrollo y Mantenimiento (industria pesada en México, especialidad: canastillas industriales).
 
-Stack:
-- Backend: FastAPI + Motor/MongoDB
-- Frontend: React + Tailwind + shadcn/ui
-- AI: Emergent LLM Key (GPT-5.2) para scoring, briefings y limpieza de datos
-- OSINT: Apify API en modo LIVE (token configurado)
+## Idioma de producto
+Español MX. Toda la UI y notificaciones deben ser en español.
 
-## Módulos completados (CHANGELOG resumido)
+## Stack
+- **Frontend:** React 19 + Tailwind + Shadcn (`/app/frontend/`)
+- **Backend:** FastAPI + Motor (`/app/backend/server.py`)
+- **DB:** MongoDB (env `MONGO_URL`, `DB_NAME`)
+- **LLM:** GPT-5.2 vía Emergent LLM Key (`emergentintegrations`)
+- **OSINT:** Apify (Google Search, Twitter, Facebook scrapers)
+- **Notif:** Twilio WhatsApp (Sandbox 5 msg/día) + SendGrid Email
 
-### V1-V4 (sesiones previas)
-- Auth JWT staff + DFNUM cliente
-- CRM Kanban (oportunidades, empresas, actividades)
-- Cotizador PDF dual-brand (DEYMA / RT) con cliente custom + unidades libres
-- Ruta de Ventas IA con autocomplete origen/destino (Nominatim/Photon)
-- Portal cliente con OC + cotizaciones por RFC
-- Onboarding cliente con doble firma (Director + Socio)
-- RH / Personal contratado (vacaciones LFT 2023 + expediente PDF)
-- Gastos de Viajero
-- Scraper nocturno (02:00 CDMX) + scoring (03:00) + digest matutino (08:00)
+## Roles
+- `director`, `socio`, `comercial`, `operaciones`
+- Cliente externo (portal separado)
 
-### V5 — Radar Greenfield OSINT (sesión previa)
-- 4 agentes 24/7 (cron 07:00 CDMX): SEMARNAT MIA, LinkedIn intent, parques industriales, permisos municipales
-- Apify LIVE para SERP real (gob.mx, edu.mx, org.mx)
-- Embudo Greenfield 6 etapas
-- Triangulación de contactos OSINT (LinkedIn → email/tel)
-- Escuadrón Conversacional (Agentes 5-8 · hourly): WhatsApp groups, Telegram, Twitter, Reddit
-- Alertas Rojas con CTA Responder (sub-24h)
-- Tareas Alberto + Tickets Maurizio
+---
 
-### V5.2 — Operación Francotirador DRO (ESTA SESIÓN · Feb 2026)
-- 2 nuevos agentes OSINT (cron 06:00 CDMX):
-  - **Agente DRO-1 (Infiltrado Gubernamental)**: dorks Apify SERP sobre `gob.mx` y `edu.mx` para padrones municipales de Directores Responsables de Obra
-  - **Agente DRO-2 (Rastreador Colegiado)**: dorks sobre `org.mx`/`edu.mx` para directorios de Colegios de Ingenieros y Arquitectos
-- Colección `db.padron_dro` con 6 etapas de embudo: `blanco_detectado → kit_cad_enviado → interaccion_tecnica → prescriptor_activo → cierre_obra_ganada / descartado`
-- Auto-asignación a **Alberto** (comercial) + plantilla pre-llenada de WhatsApp/Email
-- Auto-creación de tareas para DROs con contacto válido
-- Frontend nuevo: `/admin/francotirador-dro` con tabs Padrón (tabla + filtros + plantilla 1-clic) y Embudo (Kanban 6 columnas)
-- Botón "Ejecutar Operación Francotirador" para barrida manual on-demand
-- Plantilla editable + botones nativos WhatsApp (wa.me), Email (mailto:) y Copiar
+## Módulos implementados
 
-### Carry-over verificado
-- ✅ Marcar Visita en Ruta de Ventas IA inserta actividad automática en CRM (oportunidad creada si no existe)
+### Core CRM
+- Login JWT, Kanban CRM, Alta de Clientes, Cotizador dual-brand PDF, Mapa México
+- Dashboard de KPIs, Mis Tareas, Alertas HOT, Obras
+- RH · Personal, Ruta de Ventas IA, Gastos de Viajero
+- Portal de Cliente (`/cliente`) con tracking de trámite
 
-## Endpoints clave V5.2
-| Método | Endpoint | Notas |
-|--------|----------|-------|
-| POST | `/api/francotirador/run` | Ejecuta barrida manual (director/socio/comercial) |
-| GET  | `/api/francotirador/padron` | Lista DROs con filtros estado_mx/stage/municipio |
-| GET  | `/api/francotirador/embudo` | Kanban 6 etapas con conteos |
-| POST | `/api/francotirador/{id}/move` | Cambia etapa + historia |
-| PATCH| `/api/francotirador/{id}` | Edición campos whitelisted |
-| DELETE| `/api/francotirador/{id}` | Solo director/socio |
+### Inteligencia & OSINT
+- **Radar de Proyectos** — feed manual de oportunidades
+- **Radar Greenfield OSINT** — scraping nocturno de obras nuevas
+- **Francotirador DRO** — barrida diaria de DROs en CDMX 06:00
+- **Scraper Nocturno** — pipeline 02:00 + scoring 03:00
+- **Detecciones IA** (Webhook `/api/v1/ia-leads`) — recibe leads externos (opp-detector) con `X-API-KEY`, dedupe automático, invitación WhatsApp al grupo
+- **📡 Radar de Condominios (V6.0 — IMPLEMENTADO 2026-02)** — 3 agentes IA:
+  - 🐶 **El Sabueso** — Apify Google Search → administradores de condominios
+  - ⚡ **El Analista** — Apify Twitter → quejas CFE/CEA → GPT-5.2 clasifica
+  - 🕵️ **El Infiltrado** — Google Dorks → grupos WhatsApp/Telegram públicos
+  - 5 páginas: Caza-Leads · Alertas Dolor · Mega-Condominios · Redes Vecinales · Config
+  - Cron 04:00 CDMX + manual trigger por agente o pipeline completo
+  - GPT-5.2 estima si >=200 casas (Mega)
 
-## Modelos DB nuevos
-```
-padron_dro: {id, nombre, numero_registro, especialidad, municipio, estado_mx,
-             telefono_movil, telefono_oficina, correo_electronico,
-             url_documento_fuente, colegio_agremiado, notas,
-             stage, probabilidad, asignado_a, asignado_nombre,
-             plantilla_mensaje, fuente_agente, fecha_deteccion,
-             historia[], created_at, updated_at}
+### Gestión & Comunicación
+- **Centralizado** (Cierre del día) — PDF generado
+- **Plan Cierre $1.2M** — dashboard táctico de ventas
+- **Notificaciones Push** — multi-destinatario Twilio + SendGrid LIVE
+- **Accesos · Usuarios** — gestión de credenciales (solo director)
+- **CommsPanel flotante** — comunicaciones internas
 
-dro_runs: {run_id, iniciada, finalizada, ejecutada_por, target_estados,
-           gov_detectados, colegios_detectados, unicos_insertados,
-           tareas_creadas_alberto, modo, ok}
-```
+---
 
-## Tests
-- `/app/test_reports/iteration_9.json` — V5.2 + carry-over: **backend 22/22 PASS, frontend Playwright 100%**
-- 0 bugs críticos · 0 regresiones detectadas
+## Cron Schedule (CDMX = UTC-6)
+| Hora | Tarea |
+|---|---|
+| 02:00 | Scraper nocturno |
+| 03:00 | Scoring batch |
+| **04:00** | **🆕 Radar de Condominios (3 agentes)** |
+| 06:00 | Francotirador DRO |
+| 07:00 | Greenfield OSINT |
+| 08:00 | Morning digest |
+| Cada hora | Listening pipeline |
 
-## ROADMAP (backlog priorizado)
+---
 
-### P1 (próximas)
-- Refactor crítico: dividir `server.py` (6,432 líneas) en `routes/auth.py`, `routes/crm.py`, `routes/osint.py`, `routes/francotirador.py`, `routes/clientes.py`. Bloquea velocidad de desarrollo futuro.
-- Pydantic BaseModels para DROMoveIn / DROPatchIn (mejora OpenAPI docs)
-- LLM PDF parser para DROs detectados en gob.mx (hoy quedan como placeholder "DRO en padrón — {título PDF}")
-- Cargas de Órdenes de Compra natively en portal cliente (P1 previa)
+## Endpoints clave nuevos (V6.0)
+- `GET/PATCH /api/condo/config`
+- `POST /api/condo/run` (pipeline completa)
+- `POST /api/condo/run/{sabueso|analista|infiltrado}`
+- `GET /api/condo/leads` (filtros: `estado`, `urgencia`, `mega=1`)
+- `PATCH /api/condo/leads/{id}` (autoflag es_mega si casas>=200)
+- `POST /api/condo/leads/{id}/promover-crm`
+- `GET /api/condo/alertas` · `GET /api/condo/grupos`
+- `GET /api/condo/stats`
 
-### P2 (V3 roadmap)
-- Integración REAL Twilio (WhatsApp transaccional) — hoy mockeada
-- Integración REAL SendGrid (transaccionales) — hoy mockeada
-- Mobile PWA
+---
+
+## Backlog (Roadmap)
+
+### P0 — Próximas
+- Validar webhook `/api/v1/ia-leads` con primer lead real del agente externo opp-detector
+- Que clientes suban Órdenes de Compra desde portal (P1 anterior)
+- Refinar Apify queries del módulo Condominios (los actuales devuelven 0 — afinar dorks/actor IDs)
+
+### P1
+- Seed inicial: insertar 5-10 mega-condominios conocidos de Querétaro como base de comparación
+- Vincular alertas de dolor a leads de admins (cruce automático por fraccionamiento)
+- PWA / App móvil
+
+### P2
 - Sales Prediction con histórico
-- Apollo enrichment de pago (hoy bypass con Apify; 403 en free plan)
-- Split AdminFrancotiradorDROPage.jsx (593 líneas) → componentes PlantillaModal / EditDROModal
+- Refactor `server.py` (>8,200 líneas) → routers modulares en `/app/backend/routers/`
+- Multi-tenant SaaS para vender a otras constructoras
 
-### P3 (V4 roadmap)
-- Multi-tenant SaaS architecture (revender a otras constructoras del Bajío)
+### P3
+- Mover de Twilio Sandbox a tier pagado (eliminar límite 5 msg/día)
+- Apollo upgrade para enrichment real (actualmente 403 free plan)
 
-## Integraciones 3rd party
-- ✅ Emergent LLM Key (GPT-5.2) — text generation
-- ✅ Apify (`APIFY_TOKEN`) — LIVE web scraping
-- ✅ Nominatim / Photon Komoot — geocoding gratuito
-- ⚠️ Apollo — configurado pero 403 (free plan, bypass funcional vía Apify)
-- 🔶 Twilio — MOCKEADO
-- 🔶 SendGrid — MOCKEADO
+---
 
-## Notas operativas
-- App está deployada a producción. Cambios aplican primero al PREVIEW. Usuario debe pulsar "Deploy" en la UI para promover a prod.
-- `OSINT_MODE=live` en `/app/backend/.env`. **NO sobrescribir** esa variable ni `APIFY_TOKEN`.
-- Schedulers diarios (CDMX): scraper 02:00 · scoring 03:00 · DRO 06:00 · Greenfield 07:00 · digest 08:00 · Listening cada hora.
+## Producción
+- URL: `opp-detector.emergent.host`
+- Variables de entorno: 10 configuradas en Emergent Secrets (Twilio, SendGrid, Apify, JWT, etc.)
+- OSINT_MODE = `live`
+- Conocido: cache de Chrome puede mostrar pantalla negra tras redeploy — solución: hard refresh (Ctrl+Shift+R) o incógnito.

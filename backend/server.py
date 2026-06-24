@@ -7814,6 +7814,7 @@ async def _condo_run_analista() -> dict:
         })
 
     try:
+        import json as _json
         llm_response = await _llm_call(
             system=(
                 "Eres un analista OSINT especializado en quejas urbanas de Querétaro. "
@@ -7825,7 +7826,7 @@ async def _condo_run_analista() -> dict:
                 "relevante (true/false: true SOLO si menciona fraccionamiento/privada/coto/condominio Y es queja real). "
                 "Devuelve un JSON array con un objeto por post EN EL MISMO ORDEN."
             ),
-            user_text="POSTS:\n" + str(posts_for_llm),
+            user_text="POSTS:\n" + _json.dumps(posts_for_llm, ensure_ascii=False),
         )
         parsed = _parse_json_block(llm_response)
         if not isinstance(parsed, list):
