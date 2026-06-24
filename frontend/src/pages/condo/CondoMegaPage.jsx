@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { api, formatApiError } from "../../lib/auth";
 import {
   Building2, MessageCircle, Trash2, Phone, Mail, ExternalLink,
-  Loader2, CheckCircle2, AlertOctagon, ArrowUpRight, Crown,
+  Loader2, CheckCircle2, AlertOctagon, ArrowUpRight, Crown, Sparkles,
 } from "lucide-react";
 
 const URG_COLOR = { alto: "rose", medio: "amber", bajo: "emerald" };
@@ -11,6 +11,7 @@ export default function CondoMegaPage() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState(null);
+  const [enriching, setEnriching] = useState(null); // lead id or "batch"
 
   const load = async () => {
     setLoading(true);
@@ -21,6 +22,31 @@ export default function CondoMegaPage() {
     finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
+
+  const enrichOne = async (l) => {
+    setEnriching(l.id);
+    try {
+      const { data } = await api.post(`/condo/leads/${l.id}/enrich`);
+      if (data.enriched) {
+        setNotice({ kind: "ok", msg: `✓ ${l.condominio_nombre} enriquecido (${(data.campos || []).join(", ")})` });
+      } else {
+        setNotice({ kind: "warn", msg: `⚠️ Sin datos públicos detectables para "${l.condominio_nombre}"` });
+      }
+      load();
+    } catch (e) { setNotice({ kind: "err", msg: formatApiError(e) }); }
+    finally { setEnriching(null); }
+  };
+
+  const enrichAll = async () => {
+    if (!window.confirm("¿Enriquecer en batch hasta 12 mega-condominios? Tarda ~3-5 min.")) return;
+    setEnriching("batch");
+    try {
+      const { data } = await api.post("/condo/enrich-mega");
+      setNotice({ kind: "ok", msg: `✓ Batch terminó: ${data.procesados} procesados · ${data.con_datos} con datos nuevos` });
+      load();
+    } catch (e) { setNotice({ kind: "err", msg: formatApiError(e) }); }
+    finally { setEnriching(null); }
+  };
 
   const promover = async (l) => {
     if (!window.confirm(`Promover "${l.condominio_nombre}" al CRM?`)) return;
@@ -46,23 +72,31 @@ export default function CondoMegaPage() {
 
   return (
     <div className="p-6 max-w-[1500px] mx-auto space-y-4" data-testid="condo-mega-page">
-      <header>
-        <div className="label-overline text-[10px] text-amber-400 flex items-center gap-2">
-          <Crown size={11}/> V6.0 · Radar de Condominios · Tier Premium
+      <header className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <div className="label-overline text-[10px] text-amber-400 flex items-center gap-2">
+            <Crown size={11}/> V6.0 · Radar de Condominios · Tier Premium
+          </div>
+          <h1 className="text-3xl font-black tracking-tight mt-1" style={{ fontFamily: "Chivo, sans-serif" }}>
+            Mega-Condominios <span className="text-amber-400">·</span> +200 casas
+          </h1>
+          <div className="text-xs text-zinc-500 font-mono mt-1">
+            GPT-5.2 estima tamaño automáticamente · Filtro alto valor
+          </div>
         </div>
-        <h1 className="text-3xl font-black tracking-tight mt-1" style={{ fontFamily: "Chivo, sans-serif" }}>
-          Mega-Condominios <span className="text-amber-400">·</span> +200 casas
-        </h1>
-        <div className="text-xs text-zinc-500 font-mono mt-1">
-          GPT-5.2 estima tamaño automáticamente · Filtro alto valor
-        </div>
+        <button onClick={enrichAll} disabled={enriching !== null}
+                className="btn-primary text-xs disabled:opacity-50" data-testid="btn-enrich-all">
+          {enriching === "batch" ? <Loader2 size={12} className="inline mr-1 animate-spin"/> : <Sparkles size={12} className="inline mr-1"/>}
+          {enriching === "batch" ? "Enriqueciendo..." : "Enriquecer Todos"}
+        </button>
       </header>
 
       {notice && (
         <div className={`surface p-3 border-l-4 ${notice.kind === "ok" ? "border-emerald-500 bg-emerald-500/5"
+                                                   : notice.kind === "warn" ? "border-amber-500 bg-amber-500/5"
                                                    : "border-rose-500 bg-rose-500/5"}`} data-testid="mega-notice">
           <div className="flex items-start justify-between gap-2">
-            <div className={`text-sm ${notice.kind === "ok" ? "text-emerald-400" : "text-rose-400"}`}>
+            <div className={`text-sm ${notice.kind === "ok" ? "text-emerald-400" : notice.kind === "warn" ? "text-amber-400" : "text-rose-400"}`}>
               {notice.kind === "ok" ? <CheckCircle2 size={14} className="inline mr-2"/> : <AlertOctagon size={14} className="inline mr-2"/>}
               {notice.msg}
             </div>
@@ -127,6 +161,11 @@ export default function CondoMegaPage() {
                 )}
 
                 <div className="flex items-center gap-2 pt-3 border-t border-white/5">
+                  <button onClick={() => enrichOne(l)} disabled={enriching !== null}
+                          className="btn-ghost text-[10px] disabled:opacity-30"
+                          title="Enriquecer con OSINT" data-testid={`btn-mega-enrich-${l.id}`}>
+                    {enriching === l.id ? <Loader2 size={11} className="inline animate-spin"/> : <Sparkles size={11}/>}
+                  </button>
                   <button onClick={() => waManual(l)} disabled={!l.telefono}
                           className="btn-ghost text-[10px] flex-1 disabled:opacity-30"
                           data-testid={`btn-mega-wa-${l.id}`}>

@@ -4780,6 +4780,134 @@ async def _apify_run_actor(actor_id: str, run_input: dict, timeout_s: int = 120)
         return []
 
 
+async def _google_html_search(query: str, max_results: int = 15) -> List[dict]:
+    """Fallback final: scrape Google directo con UA realista."""
+    try:
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True,
+                                       headers={
+                                           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                                           "Accept-Language": "es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7",
+                                           "Accept-Encoding": "gzip, deflate, br",
+                                           "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120"',
+                                           "Sec-Ch-Ua-Mobile": "?0",
+                                           "Sec-Ch-Ua-Platform": '"Windows"',
+                                       }) as cli:
+            r = await cli.get(
+                "https://www.google.com/search",
+                params={"q": query, "hl": "es", "gl": "mx", "num": str(max_results)},
+            )
+            if r.status_code != 200:
+                logger.warning(f"[GOOGLE-DIRECT] HTTP {r.status_code} for q={query[:60]}")
+                return []
+            html = r.text
+    except Exception as e:
+        logger.warning(f"[GOOGLE-DIRECT] error: {e}")
+        return []
+
+    # Google result blocks. Try multiple patterns since they vary.
+    results = []
+    # Pattern: <a href="/url?q=URL&...">TITLE</a> ... <span class="...">SNIPPET
+    link_pat = re.compile(r'<a\s+href="/url\?q=([^&"]+)[^"]*"[^>]*>.*?<h3[^>]*>(.*?)</h3>', re.DOTALL)
+    matches = link_pat.findall(html)
+    from urllib.parse import unquote
+    for href, title_raw in matches:
+        try:
+            url = unquote(href)
+        except Exception:
+            url = href
+        title = re.sub(r"<[^>]+>", "", title_raw).strip()
+        if not url.startswith("http"):
+            continue
+        if "google.com" in url or "youtube.com/redirect" in url:
+            continue
+        results.append({"url": url, "title": title, "description": ""})
+        if len(results) >= max_results:
+            break
+
+    logger.info(f"[GOOGLE-DIRECT] q='{query[:50]}' → {len(results)} results")
+    return results
+
+
+async def _ddg_search(query: str, max_results: int = 15) -> List[dict]:
+    """Búsqueda web gratuita vía DuckDuckGo Lite HTML (sin API key, sin bot block).
+    Retorna list[{title, url, description}] compatible con organicResults de Apify."""
+    # Primero: lite.duckduckgo.com (más permisivo con bots)
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True,
+                                       headers={
+                                           "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                                           "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
+                                       }) as cli:
+            r = await cli.get(
+                "https://lite.duckduckgo.com/lite/",
+                params={"q": query, "kl": "mx-es"},
+            )
+            if r.status_code != 200:
+                logger.warning(f"[DDG-lite] HTTP {r.status_code} for q={query[:60]}")
+                return []
+            html = r.text
+    except Exception as e:
+        logger.warning(f"[DDG-lite] error: {e}")
+        return []
+
+    # Parse DDG Lite results: each result is a series of TRs
+    # <tr><td class="result-link"><a href="URL">TITLE</a></td></tr>
+    # <tr><td class="result-snippet">SNIPPET</td></tr>
+    results = []
+    link_pat = re.compile(r'<a\s+[^>]*?class="result-link"[^>]*?href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
+    snip_pat = re.compile(r'<td[^>]*class="result-snippet"[^>]*>(.*?)</td>', re.DOTALL)
+
+    links = link_pat.findall(html)
+    snips = snip_pat.findall(html)
+
+    for i, (href, title_raw) in enumerate(links):
+        title = re.sub(r"<[^>]+>", "", title_raw).strip()
+        snippet = ""
+        if i < len(snips):
+            snippet = re.sub(r"<[^>]+>", "", snips[i]).strip()
+        # DDG lite wraps URLs via redirect /l/?uddg=ENCODED
+        if href.startswith("//") or "duckduckgo.com/l/" in href or "/l/?" in href:
+            qm = re.search(r"uddg=([^&]+)", href)
+            if qm:
+                from urllib.parse import unquote
+                href = unquote(qm.group(1))
+            elif href.startswith("//"):
+                href = "https:" + href
+        results.append({"url": href, "title": title, "description": snippet})
+        if len(results) >= max_results:
+            break
+
+    logger.info(f"[DDG-lite] q='{query[:50]}' → {len(results)} results")
+    return results
+
+
+async def _web_search(query: str, max_results: int = 15) -> List[dict]:
+    """Smart search cascade: Apify → DuckDuckGo Lite → Google direct.
+    Returns list of {url, title, description}."""
+    # Try Apify first (paid plan, may return 402)
+    res = await _apify_run_actor(
+        "apify/google-search-scraper",
+        {"queries": query, "resultsPerPage": max_results, "maxPagesPerQuery": 1,
+         "countryCode": "mx", "languageCode": "es"},
+        timeout_s=60,
+    )
+    organic = []
+    for r in res or []:
+        organic.extend(r.get("organicResults", []) or [])
+    if organic:
+        return [{"url": it.get("url", ""), "title": it.get("title", ""),
+                 "description": it.get("description") or it.get("snippet", "")}
+                for it in organic[:max_results]]
+    # Fallback 1: DDG lite (free)
+    ddg = await _ddg_search(query, max_results=max_results)
+    if ddg:
+        return ddg
+    # Fallback 2: Google direct (last resort)
+    return await _google_html_search(query, max_results=max_results)
+
+
 async def _apollo_people_search(titles: List[str], locations: List[str],
                                   industries: List[str] = None, per_page: int = 25) -> List[dict]:
     """Apollo.io mixed_people/search. Retorna lista de personas con email/mobile (si verified)."""
@@ -7686,7 +7814,7 @@ def _condo_extract_tg_links(text: str) -> List[str]:
 
 # -------- Agente 1: El Sabueso (Scraper de Contactos) --------
 async def _condo_run_sabueso() -> dict:
-    """Busca administradores de condominios en Querétaro vía Apify Google Search,
+    """Busca administradores de condominios en Querétaro vía web search (Apify+DDG fallback),
     extrae teléfonos/emails y los inserta como leads (con dedupe)."""
     cfg = await _condo_get_config()
     ciudades = cfg.get("ciudades", ["Querétaro"])
@@ -7694,9 +7822,6 @@ async def _condo_run_sabueso() -> dict:
     inserted, updated, skipped = 0, 0, 0
     errors = []
     raw_count = 0
-
-    if not _osint_live_mode() or not APIFY_TOKEN:
-        return {"agente": "sabueso", "ok": False, "mock": True, "msg": "OSINT_MODE no live o sin APIFY_TOKEN"}
 
     # Queries más amplias: sin comillas exactas (Google las relaja)
     # y dorks específicos para sacar contactos reales.
@@ -7713,22 +7838,12 @@ async def _condo_run_sabueso() -> dict:
 
     for q in queries[:10]:  # cap to keep API costs reasonable
         try:
-            results = await _apify_run_actor(
-                "apify/google-search-scraper",
-                {"queries": q, "resultsPerPage": 10, "maxPagesPerQuery": 1,
-                 "countryCode": "mx", "languageCode": "es",
-                 "saveHtml": False, "saveHtmlToKeyValueStore": False},
-                timeout_s=90,
-            )
-            logger.info(f"[CONDO SABUESO] q='{q[:60]}' → {len(results or [])} docs")
+            items = await _web_search(q, max_results=10)
+            logger.info(f"[CONDO SABUESO] q='{q[:60]}' → {len(items)} results")
         except Exception as e:
             errors.append(f"sabueso/{q}: {e}")
             continue
 
-        # google-search-scraper returns 1 doc per query with `organicResults`
-        items = []
-        for r in results or []:
-            items.extend(r.get("organicResults", []) or [])
         raw_count += len(items)
 
         for it in items[:30]:
@@ -7911,30 +8026,20 @@ async def _condo_run_analista() -> dict:
 
 # -------- Agente 3: El Infiltrado (Buscador de Comunidades) --------
 async def _condo_run_infiltrado() -> dict:
-    """Google Dorking para encontrar links públicos de grupos WhatsApp/Telegram vecinales."""
+    """Google Dorking para encontrar links públicos de grupos WhatsApp/Telegram vecinales.
+    Usa web search (Apify+DDG fallback)."""
     cfg = await _condo_get_config()
     dorks = cfg.get("keywords_grupos", [])
     inserted, skipped = 0, 0
     errors = []
 
-    if not _osint_live_mode() or not APIFY_TOKEN:
-        return {"agente": "infiltrado", "ok": False, "mock": True, "msg": "OSINT_MODE no live o sin APIFY_TOKEN"}
-
     for dork in dorks[:6]:
         try:
-            results = await _apify_run_actor(
-                "apify/google-search-scraper",
-                {"queries": dork, "resultsPerPage": 15, "maxPagesPerQuery": 1, "countryCode": "mx", "languageCode": "es"},
-                timeout_s=90,
-            )
-            logger.info(f"[CONDO INFILTRADO] dork='{dork[:60]}' → {len(results or [])} docs")
+            items = await _web_search(dork, max_results=15)
+            logger.info(f"[CONDO INFILTRADO] dork='{dork[:60]}' → {len(items)} results")
         except Exception as e:
             errors.append(f"infiltrado/{dork}: {e}")
             continue
-
-        items = []
-        for r in results or []:
-            items.extend(r.get("organicResults", []) or [])
 
         for it in items[:30]:
             src_url = it.get("url", "")
@@ -8138,6 +8243,120 @@ async def condo_promover_a_crm(lid: str, user: dict = Depends(condo_director_or_
         raise HTTPException(status_code=500, detail=str(e))
     await db.condo_leads.update_one({"_id": lid}, {"$set": {"estado": "contactado"}})
     return {"ok": True, "promovidos": len(new_in_crm or [])}
+
+
+# -------- Enriquecer un lead con datos reales del web (Apify + GPT-5.2) --------
+async def _condo_enrich_one(lead: dict) -> dict:
+    """Busca contactos públicos del fraccionamiento via web search + GPT-5.2.
+    Retorna dict con campos a actualizar."""
+    nombre = lead.get("condominio_nombre", "")
+    if not nombre:
+        return {}
+
+    query = f'"{nombre}" Querétaro administrador OR contacto OR telefono'
+    try:
+        organic = await _web_search(query, max_results=8)
+    except Exception as e:
+        logger.warning(f"[CONDO ENRICH] {nombre}: {e}")
+        return {}
+
+    if not organic:
+        return {}
+
+    # Recolecta candidatos
+    blob = " || ".join([
+        f"{it.get('title','')} | {it.get('description','')} | {it.get('url','')}"
+        for it in organic[:8]
+    ])
+    phones = _condo_extract_phones(blob)
+    emails = _condo_extract_emails(blob)
+
+    # GPT-5.2 valida cuál teléfono/email pertenece realmente al fraccionamiento
+    upd = {}
+    if phones or emails:
+        try:
+            import json as _json
+            llm = await _llm_call(
+                system=(
+                    "Eres un investigador OSINT. Te paso resultados de Google sobre un fraccionamiento de Querétaro. "
+                    "Debes devolver JSON: "
+                    "{\"telefono\": \"el teléfono más probable del administrador o nada\", "
+                    "\"email\": \"email del fraccionamiento o nada\", "
+                    "\"website\": \"sitio oficial o nada\", "
+                    "\"contacto_nombre\": \"nombre de la persona si aparece o nada\", "
+                    "\"confianza\": \"alta|media|baja\"}. "
+                    "NO inventes datos. Si no hay evidencia clara, deja el campo vacío."
+                ),
+                user_text=_json.dumps({
+                    "fraccionamiento": nombre,
+                    "ubicacion": lead.get("ubicacion", ""),
+                    "telefonos_candidatos": phones[:10],
+                    "emails_candidatos": emails[:10],
+                    "snippets": blob[:2000],
+                }, ensure_ascii=False),
+            )
+            parsed = _parse_json_block(llm) or {}
+            if isinstance(parsed, dict):
+                if parsed.get("telefono"):
+                    upd["telefono"] = re.sub(r"\D", "", parsed["telefono"])[-10:]
+                if parsed.get("email"):
+                    upd["email"] = parsed["email"][:120]
+                if parsed.get("contacto_nombre"):
+                    upd["contacto_nombre"] = parsed["contacto_nombre"][:120]
+                if parsed.get("website"):
+                    upd["source_url"] = parsed["website"][:300]
+                upd["enriquecimiento_confianza"] = parsed.get("confianza", "baja")
+        except Exception:
+            logger.exception(f"[CONDO ENRICH LLM] {nombre}")
+            # Fallback: usa primer telefono detectado
+            if phones:
+                upd["telefono"] = phones[0]
+            if emails:
+                upd["email"] = emails[0]
+
+    if upd:
+        upd["enriquecido_fecha"] = iso(now_utc())
+        upd["enriquecido_query"] = query
+    return upd
+
+
+@api.post("/condo/leads/{lid}/enrich")
+async def condo_enrich_lead(lid: str, user: dict = Depends(condo_director_or_socio)):
+    """Enriquece un lead con datos reales del web (público OSINT)."""
+    lead = await db.condo_leads.find_one({"_id": lid})
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    upd = await _condo_enrich_one(lead)
+    if not upd:
+        return {
+            "ok": False, "enriched": False,
+            "msg": "Búsqueda web bloqueada desde el servidor (Apify free=402, DDG=202, Google=429). Configura FIRECRAWL_API_KEY (free 1k/mes) o upgrade Apify para habilitar enriquecimiento.",
+            "needs_setup": True,
+        }
+    await db.condo_leads.update_one({"_id": lid}, {"$set": upd})
+    return {"ok": True, "enriched": True, "campos": list(upd.keys()), "data": upd}
+
+
+@api.post("/condo/enrich-mega")
+async def condo_enrich_mega_batch(user: dict = Depends(require_roles("director", "socio"))):
+    """Enriquece en batch hasta 12 mega-condominios sin teléfono."""
+    cursor = db.condo_leads.find({
+        "es_mega": True,
+        "$or": [{"telefono": ""}, {"telefono": {"$exists": False}}, {"enriquecido_fecha": {"$exists": False}}],
+    }).limit(12)
+    procesados, con_datos = 0, 0
+    detalle = []
+    async for lead in cursor:
+        procesados += 1
+        upd = await _condo_enrich_one(lead)
+        if upd:
+            await db.condo_leads.update_one({"_id": lead["_id"]}, {"$set": upd})
+            if upd.get("telefono") or upd.get("email"):
+                con_datos += 1
+            detalle.append({"nombre": lead.get("condominio_nombre"), "campos": list(upd.keys())})
+        else:
+            detalle.append({"nombre": lead.get("condominio_nombre"), "campos": []})
+    return {"ok": True, "procesados": procesados, "con_datos": con_datos, "detalle": detalle}
 
 
 @api.get("/condo/alertas")
