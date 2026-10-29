@@ -1,1 +1,9 @@
-PLACEHOLDER
+{
+  "actualizado": "2026-10-29T07:38:00-06:00",
+  "lote": "2026-10-29-qro-manto-nuevas-4",
+  "nota": "Fichas NUEVAS desde empresas10 #1-#31 (excluyendo basura godaddy/odoo) y yaloencontre. verificado=false. whatsapp vacío. Teléfono en telefono.",
+  "prospectos": [
+    {"nombre": "Mantenimiento de equipo industrial – Federico Peralta", "giro": "Mantenimiento de equipo industrial", "ciudad": "Santiago de Querétaro", "estado": "Querétaro", "telefono": "442 125 5407", "whatsapp": "", "email": "fimsa01@prodigy.net.mx", "direccion": "Fray Martin de Porres, Felipe Carrillo Puerto, 76138 Santiago de Querétaro, Qro.", "verificado": false, "fuente": "empresas10", "evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"},
+    {"nombre": "Limpieza Industrial en Queretaro Sermib", "giro": "Limpieza industrial", "ciudad": "Santiago de Querétaro", "estado": "Querétaro", "telefono": "442 672 9151", "whatsapp": "", "email": "ventas@sermib.com.mx", "direccion": "P.º Jurica 105-int. 33A, Jurica, 76100 Santiago de Querétaro, Qro.", "verificado": false, "fuente": "empresas10", "evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"}
+  ]
+}
