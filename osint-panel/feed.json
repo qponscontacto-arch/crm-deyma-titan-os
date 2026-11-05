@@ -1,1 +1,30 @@
-PLACEHOLDER
+{
+  "actualizado": "2026-11-05",
+  "lote": "20261105-osint-qro-new",
+  "prospectos": [
+    {
+      "nombre": "Ramirez Gonzalez Alejandro",
+      "giro": "Mantenimiento industrial",
+      "telefono": "442 242 3811",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Del Bambú 23, El Carrizal, 76030 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php",
+      "verificado": false
+    },
+    {
+      "nombre": "TECNOCONTROL EN SISTEMAS DE MANTENIMIENTO",
+      "giro": "Sistemas de mantenimiento",
+      "telefono": "442 242 3725",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "C. Oceano Indico 104-int 2, San Antonio del Maurel, 76137 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php",
+      "verificado": false
+    }
+  ]
+}
