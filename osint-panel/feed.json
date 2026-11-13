@@ -1,1 +1,56 @@
-PLACEHOLDER
+{
+  "actualizado": "2026-11-13T07:42:00-06:00",
+  "lote": "20261113-QRO",
+  "prospectos": [
+    {
+      "nombre": "ABASTECERORA INDUSTRIAL Y MONTACARGAS",
+      "telefono": "442 204 7563",
+      "whatsapp": "",
+      "email": "ventas.aim.qro@gmail.com",
+      "direccion": "Hilario Carrillo 29, Reforma Agraria, 76086 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "PIMSA PROYECTOS INDUSTRIALES Y MANTENIMIENTO",
+      "telefono": "442 238 2205",
+      "whatsapp": "",
+      "email": "hola@pimsaqro.com",
+      "direccion": "P.º Cta. Bonita 592, Residencial Santorini, Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Servicios Industriales SOMA",
+      "telefono": "442 372 0554",
+      "whatsapp": "",
+      "email": "contacto@somaindustrial.com.mx",
+      "direccion": "Reforma 35, San Pablo, 76130 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Frioecsa",
+      "telefono": "442 228 3359",
+      "whatsapp": "",
+      "email": "ingenieriayproyectos@frioecsa.com.mx",
+      "direccion": "C. Plateros, Peñuelas, 76148 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "LIMPIEZA PROFESIONAL COES DEL BAJÍO QUERÉTARO",
+      "telefono": "442 850 5359",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Calle La Fe #101, Fraccionamiento Modelo, Querétaro, Querétaro",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://www.yaloencontre.mx/buscar.php?estado=Queretaro&municipio=QUERETARO&var=Mantenimiento%20Industrial"
+    }
+  ]
+}
