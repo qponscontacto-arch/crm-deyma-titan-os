@@ -1,1 +1,26 @@
-PLACEHOLDER
+{
+  "actualizado": "2026-11-24T07:45:00-06:00",
+  "lote": "20261124-QRO-MANT",
+  "prospectos": [
+    {
+      "nombre": "Ramirez Gonzalez Alejandro",
+      "telefono": "442 242 3811",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Del Bambú 23, El Carrizal, 76030 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Trapos y Líquidos Para Mantenimiento Industrial y Comercial",
+      "telefono": "442 213 8404",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Cerro Libertad 2, Colinas del Cimatario, 76090 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    }
+  ]
+}
