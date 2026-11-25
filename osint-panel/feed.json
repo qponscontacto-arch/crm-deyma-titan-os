@@ -1,23 +1,253 @@
 {
-  "actualizado": "2026-11-24T07:45:00-06:00",
-  "lote": "20261124-QRO-MANT",
+  "actualizado": "2026-11-25T07:45:00-06:00",
+  "lote": "20261125-QRO-MANT",
   "prospectos": [
     {
-      "nombre": "Ramirez Gonzalez Alejandro",
-      "telefono": "442 242 3811",
+      "nombre": "Mantenimiento de equipo industrial – Federico Peralta – Querétaro",
+      "telefono": "442 125 5407",
       "whatsapp": "",
-      "email": "",
-      "direccion": "Del Bambú 23, El Carrizal, 76030 Santiago de Querétaro, Qro.",
+      "email": "fimsa01@prodigy.net.mx",
+      "direccion": "Fray Martin de Porres, Felipe Carrillo Puerto, 76138 Santiago de Querétaro, Qro.",
       "ciudad": "Querétaro",
       "estado": "Querétaro",
       "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
     },
     {
-      "nombre": "Trapos y Líquidos Para Mantenimiento Industrial y Comercial",
-      "telefono": "442 213 8404",
+      "nombre": "Limpieza Industrial en Queretaro Sermib",
+      "telefono": "442 672 9151",
+      "whatsapp": "",
+      "email": "ventas@sermib.com.mx",
+      "direccion": "P.º Jurica 105-int. 33A, Jurica, 76100 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "GELI Grupo Ecológico de Limpieza Industrial S.A. de C.V.",
+      "telefono": "442 214 1623",
+      "whatsapp": "",
+      "email": "veronica.lopez@grupogeli.com",
+      "direccion": "privada, General Lázaro Cárdenas, Estrella, 76030 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "SyR CONSTRUCCIONES, S.A. DE C.V.",
+      "telefono": "442 215 4499",
+      "whatsapp": "",
+      "email": "ventas@syrconstrucciones.com",
+      "direccion": "Ley 6 de Enero 57, Casa Blanca, 76030 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "PROSII",
+      "telefono": "442 215 3646",
+      "whatsapp": "",
+      "email": "administracion@prosii.com.mx",
+      "direccion": "Océano Pacífico 239, San Antonio del Maurel, 76137 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "TECNOCONTROL EN SISTEMAS DE MANTENIMIENTO",
+      "telefono": "442 242 3725",
       "whatsapp": "",
       "email": "",
-      "direccion": "Cerro Libertad 2, Colinas del Cimatario, 76090 Santiago de Querétaro, Qro.",
+      "direccion": "C. Oceano Indico 104-int 2, San Antonio del Maurel, 76137 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Reparacion maquinaria Industrial MR",
+      "telefono": "442 414 9302",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "C. Cardenal 7-no.7, La Pradera, 76269 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "MANTENIMIENTO QUERÉTARO",
+      "telefono": "442 719 8565",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "C. Obreros, San Pedrito, Peñuelas, 76148 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Emi Eléctricos Y Mantenimiento Industrial, S.a. De C.v.",
+      "telefono": "442 592 6003",
+      "whatsapp": "",
+      "email": "info@emindustrial.com.mx",
+      "direccion": "santafe 108 B casa 25 nuevo capricho, 76230 Juriquilla, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Comercializadora Ecoheat",
+      "telefono": "442 589 7751",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Circ, Cto. Moisés Solana #304 C, Colonia Rafael López, 76070 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Equipos, Máquinas y Repuestos Industriales",
+      "telefono": "442 214 1514",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "C. Carlos Septién García 44, Cimatario, 76030 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "hm servicios industriales.com",
+      "telefono": "442 479 6588",
+      "whatsapp": "",
+      "email": "contacto@hmserviciosindustriales.com.mx",
+      "direccion": "76147, C. Río Yaqui 807, Menchaca I, 76140 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Refrigeration and Air Conditioning Bajio - Querétaro",
+      "telefono": "442 223 3112",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Blvd. Bernardo Quintana 113, Villas del Parque, 76140 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Servicio y Reparación a Bombas De Agua",
+      "telefono": "442 460 0457",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Calle Ignacio Zaragoza Oriente 152, San Francisquito, 76058 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Comercializadora y Mantenimiento Ram-Her",
+      "telefono": "442 111 6674",
+      "whatsapp": "",
+      "email": "ramher.proyectos@comercializadoraymantenimientoramher.com",
+      "direccion": "Senda de Los Recuerdos 21, Milenio 3ra Secc, 76060 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Maise",
+      "telefono": "442 410 5174",
+      "whatsapp": "",
+      "email": "ventas@maise.com.mx",
+      "direccion": "Benito Juárez 100, José María Arteaga, 76137 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "MANTENIMIENTO VIABLE S DE RL DE CV",
+      "telefono": "442 213 4191",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Loma de Landa #16, Loma Dorada, 76060 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Mantenimiento integral qro",
+      "telefono": "442 479 2873",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Michoacán 50-64, San José de los Olvera, 76902 San José de los Olvera, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Electricidad Industrial EINDUS",
+      "telefono": "442 243 2976",
+      "whatsapp": "",
+      "email": "contacto@eindus.com.mx",
+      "direccion": "Panaderos 65, San Pedrito Peñuelas I, 76148 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Bandas Transportadoras y Servicios Integrales de Querétaro",
+      "telefono": "442 257 1087",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Fray Martin de Porres 8, Felipe Carrillo Puerto, 76139 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Metarco",
+      "telefono": "442 669 6143",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Libramiento Sur Pte 1371, El Retablo, 76085 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "VACE Industrial",
+      "telefono": "442 365 5109",
+      "whatsapp": "",
+      "email": "alberto.valdez@vaceindustrial.com",
+      "direccion": "Bodega Interior 40 Micro Parque Industrial Navex Park. Calle Loma del San Gremal, Santa María Magdalena No 108, 76137 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "SERV INDUSTRIAL S.A DE C.V.",
+      "telefono": "442 248 2677",
+      "whatsapp": "",
+      "email": "contacto@serv-industrial.com",
+      "direccion": "Fray García de Salvatierra 207, Quintas del Marques, 76047 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Mantenimiento Integral Qro",
+      "telefono": "442 199 4587",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "Monte Atlas 478, La Loma, 76168 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "Gas Natural Y Mantenimiento Industrial",
+      "telefono": "442 493 5673",
+      "whatsapp": "",
+      "email": "",
+      "direccion": "vesubio # 504 col, Loma Bonita, 76118 Santiago de Querétaro, Qro.",
       "ciudad": "Querétaro",
       "estado": "Querétaro",
       "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
