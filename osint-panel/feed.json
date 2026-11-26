@@ -1,1 +1,26 @@
-PLACEHOLDER
+{
+  "actualizado": "2026-11-26T07:45:00-06:00",
+  "lote": "20261126-QRO-GTO-MANT",
+  "prospectos": [
+    {
+      "nombre": "ABASTECERORA INDUSTRIAL Y MONTACARGAS",
+      "telefono": "442 204 7563",
+      "whatsapp": "",
+      "email": "ventas.aim.qro@gmail.com",
+      "direccion": "Hilario Carrillo 29, Reforma Agraria, 76086 Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    },
+    {
+      "nombre": "PIMSA PROYECTOS INDUSTRIALES Y MANTENIMIENTO",
+      "telefono": "442 238 2205",
+      "whatsapp": "",
+      "email": "hola@pimsaqro.com",
+      "direccion": "76050, P.º Cta. Bonita 592, Residencial Santorini, Santiago de Querétaro, Qro.",
+      "ciudad": "Querétaro",
+      "estado": "Querétaro",
+      "url_evidencia": "https://empresas10.com/mantoindustrial/queretaro.php"
+    }
+  ]
+}
